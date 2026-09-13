@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "maxSeverity": "high",
+  "requireLock": true,
+  "requireSignature": false,
+  "capabilities": {
+    "network": true,
+    "secrets": false,
+    "privilege": false,
+    "install": false
+  },
+  "requireDeclared": ["exec"],
+  "denySkills": ["*-miner", "crypto-*"]
+}

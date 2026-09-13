@@ -1,0 +1,36 @@
+name: skillnotary
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      # The gate: lockfile integrity + attestation + policy + risk audit.
+      # Exits non-zero on drift, policy violations, or findings at/above
+      # the policy's maxSeverity, which fails the job.
+      - name: Verify agent skills
+        run: npx --yes skillnotary ci
+
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - run: npm install
+      - run: npm test
+      - run: npm run typecheck

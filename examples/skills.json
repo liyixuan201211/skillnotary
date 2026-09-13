@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "pdf-tools",
+      "source": "github:acme/agent-skills#skills/pdf-tools@v1.2.0"
+    },
+    {
+      "name": "changelog-writer",
+      "source": "./vendor/changelog-writer"
+    }
+  ]
+}

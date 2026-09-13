@@ -1,0 +1,51 @@
+{
+  "name": "skillnotary",
+  "version": "0.1.0",
+  "description": "Lockfile, provenance and capability policy for AI agent skills. Pin what your agent can do — and prove it.",
+  "type": "module",
+  "bin": {
+    "skillnotary": "./src/cli.ts"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "check": "node --test && tsc --noEmit",
+    "prepublishOnly": "node --test && tsc --noEmit",
+    "sn": "node src/cli.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai-agents",
+    "agent-skills",
+    "skills",
+    "supply-chain",
+    "lockfile",
+    "provenance",
+    "attestation",
+    "sbom",
+    "security",
+    "claude-code",
+    "mcp",
+    "ai"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skillnotary/skillnotary.git"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "typescript": "^7.0.2"
+  }
+}
