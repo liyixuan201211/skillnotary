@@ -23,6 +23,7 @@
   "files": [
     "src",
     "README.md",
+    "CHANGELOG.md",
     "SECURITY.md",
     "SECURITY-AUDIT.md",
     "LICENSE"
