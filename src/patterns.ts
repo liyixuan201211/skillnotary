@@ -112,7 +112,23 @@ export const RULES: Rule[] = [
     severity: "high",
     scope: "prose",
     pattern:
-      /ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|prompts)|do\s+not\s+(?:tell|inform|notify)\s+the\s+user|do\s+not\s+mention\s+(?:this|it)\s+to\s+the\s+user|(?:exfiltrate|send|upload|post)\s+(?:the\s+)?(?:contents?|data|secrets?|credentials?|env|files?)\s+to\b|disable\s+(?:all\s+)?(?:safety|security|guardrails?|logging|audit)|\b(?:silently|secretly|covertly)\b|never\s+(?:mention|reveal|disclose)|do\s+not\s+(?:ask|require)\s+(?:for\s+)?(?:permission|confirmation|approval)/i,
+      /ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|prompts)|do\s+not\s+(?:tell|inform|notify)\s+the\s+user|do\s+not\s+mention\s+(?:this|it)\s+to\s+the\s+user|(?:exfiltrate|send|upload|post)\s+(?:the\s+)?(?:contents?|data|secrets?|credentials?|env|files?)\s+to\b|disable\s+(?:all\s+)?(?:safety|security|guardrails?|logging|audit)|never\s+(?:mention|reveal|disclose)|do\s+not\s+(?:ask|require)\s+(?:for\s+)?(?:permission|confirmation|approval)/i,
+  },
+  {
+    // Split out from R009 because this phrasing is genuinely ambiguous:
+    // "act silently" is coercion, but "do not act silently" is a *safety*
+    // instruction, and "the file changes silently" is just description.
+    // So it requires an action verb near the adverb, and then checks the
+    // sentence for a negation before firing.
+    id: "R028",
+    title: "Acts covertly",
+    detail:
+      "Tells the agent to act without the user noticing. Benign skills either say the opposite (\"do not do this silently\") or merely describe a risk, which is why an action verb and the surrounding sentence are both required.",
+    severity: "medium",
+    scope: "prose",
+    pattern:
+      /\b(?:act|do|run|execute|perform|proceed|delete|remove|send|upload|post|update|modify|overwrite|write|install|copy|move|push|fetch|download|skip|exfiltrate|steal)\w*\b[^.\n]{0,40}?\b(?:silently|secretly|covertly)\b|\b(?:silently|secretly|covertly)\b[^.\n]{0,40}?\b(?:act|do|run|execute|perform|proceed|delete|remove|send|upload|post|update|modify|overwrite|write|install|copy|move|push|fetch|download|skip|exfiltrate|steal)\w*\b/i,
+    suppressIf: ({ sentence }) => SAFETY_NEGATION.test(sentence),
   },
   {
     id: "R022",
@@ -229,8 +245,11 @@ export const RULES: Rule[] = [
     scope: "any",
     capability: "fs.write",
     capabilityOnly: true,
+    // The character class after `>` keeps placeholders and arrows out:
+    // `<path-or-git-source>` and `a -> b` are not redirects, but a bare
+    // `>{1,2}\s*\S` matches the `>` in both.
     pattern:
-      /\bwriteFileSync\b|\bwriteFile\s*\(|\bmkdirSync\b|\bshutil\.(?:copy|move|rmtree)\b|\b(?:cp|mv|mkdir|touch|tee)\s+\S|>{1,2}\s*\S/,
+      /\bwriteFileSync\b|\bwriteFile\s*\(|\bmkdirSync\b|\bshutil\.(?:copy|move|rmtree)\b|\b(?:cp|mv|mkdir|touch|tee)\s+\S|(?<![-=<>])>{1,2}\s*[\w./~$"'\\]/,
   },
 ];
 

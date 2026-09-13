@@ -281,24 +281,42 @@ function locate(text: string, index: number): { line: number; snippet: string } 
  * The sentence surrounding an index. Rules use this to judge direction:
  * "send data without asking" and "do not send data without asking" share a
  * substring but mean opposite things.
+ *
+ * A single newline is treated as a soft wrap, not a sentence end. Prose in a
+ * SKILL.md is hard-wrapped at ~80 columns, so treating `\n` as a boundary would
+ * cut a sentence in half and silently strip the negation a guard depends on —
+ * which is exactly how "Do not silently proceed" became a false positive.
  */
 export function sentenceAt(text: string, index: number): string {
-  const boundaries = [".", "!", "?", "\n"];
+  const isBoundary = (i: number): boolean => {
+    const ch = text[i] ?? "";
+    if (ch === "." || ch === "!" || ch === "?") return true;
+    if (ch !== "\n") return false;
+    if ((text[i + 1] ?? "") === "\n") return true; // blank line ends a block
+    // A new line that starts a list item, heading or blockquote is a new block.
+    return /^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>)/.test(text.slice(i + 1));
+  };
+
   let start = 0;
   for (let i = index - 1; i >= 0; i--) {
-    if (boundaries.includes(text[i] ?? "")) {
+    if (isBoundary(i)) {
       start = i + 1;
       break;
     }
   }
   let end = text.length;
   for (let i = index; i < text.length; i++) {
-    if (boundaries.includes(text[i] ?? "")) {
+    if (isBoundary(i)) {
       end = i;
       break;
     }
   }
-  return text.slice(start, end).trim();
+  // Strip a leading block marker so callers get the prose, not "- " / "1. ".
+  return text
+    .slice(start, end)
+    .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+|>\s*)/, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function looksBinary(buf: Buffer): boolean {
@@ -742,12 +760,23 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
     });
   }
 
-  findings.sort(compareFindings);
+  // One finding per rule, file and capability. A rule that matches in several
+  // segments of the same document used to produce a wall of near-identical
+  // lines (three copies of R007 for one file); distinct capabilities are still
+  // reported separately, since they are distinct facts.
+  const seen = new Set<string>();
+  const deduped = findings.filter((finding) => {
+    const key = [finding.rule, finding.file, finding.capability ?? "", finding.title].join("\u0000");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  deduped.sort(compareFindings);
 
   // Attach the directive that covers each finding, if any. Nothing is dropped
   // here: whether a directive is *honoured* is a policy decision that belongs
   // to the user's config, not to the skill being reviewed.
-  for (const finding of findings) {
+  for (const finding of deduped) {
     const directive = suppressions.find(
       (candidate) =>
         candidate.rule === finding.rule &&
@@ -770,7 +799,7 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
     license,
     observed: sortCapabilities([...observed]),
     declared,
-    findings,
+    findings: deduped,
     suppressions,
     files: digest.files,
     bytes: digest.bytes,
