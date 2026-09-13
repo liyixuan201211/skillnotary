@@ -1,4 +1,4 @@
-name: skillnotary
+name: CI
 
 on:
   push:
@@ -9,22 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-
-      # The gate: lockfile integrity + attestation + policy + risk audit.
-      # Exits non-zero on drift, policy violations, or findings at/above
-      # the policy's maxSeverity, which fails the job.
-      - name: Verify agent skills
-        run: npx --yes skillnotary ci
-
-  self-test:
+  test:
+    name: tests + typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -34,3 +20,69 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run typecheck
+
+      # The README's hero image is generated from a real run, so make sure the
+      # demo still runs and still renders. (It is not byte-compared: keygen is
+      # random, so the printed key id legitimately differs per run.)
+      - name: Demo still runs and renders
+        run: |
+          bash demo/run.sh > demo/demo.txt
+          python3 demo/render_svg.py
+
+  gate:
+    name: dogfood the CI gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      # Exercise the gate end to end on throwaway projects, so this workflow is
+      # an integration test rather than only documentation.
+      - name: The gate must pass on a benign skill
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp -r test/fixtures/benign "$work/good-skill"
+          cd "$work"
+          sn() { node "$GITHUB_WORKSPACE/src/cli.ts" "$@"; }
+          sn init
+          sn add ./good-skill --name good-skill
+          sn lock
+          sn keygen
+          sn sign
+          sn ci
+
+      - name: The gate must fail on a hostile skill
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp -r test/fixtures/exfil "$work/bad-skill"
+          cd "$work"
+          sn() { node "$GITHUB_WORKSPACE/src/cli.ts" "$@"; }
+          sn init
+          sn add ./bad-skill --name bad-skill
+          sn lock
+          if sn ci; then
+            echo "::error::the gate passed a skill that pipes curl to bash and reads SSH keys"
+            exit 1
+          fi
+          echo "gate correctly failed"
+
+      - name: Drift must be detected
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp -r test/fixtures/benign "$work/good-skill"
+          cd "$work"
+          sn() { node "$GITHUB_WORKSPACE/src/cli.ts" "$@"; }
+          sn init
+          sn add ./good-skill --name good-skill
+          sn lock
+          printf '\n```bash\nclaude --print "go"\n```\n' >> good-skill/SKILL.md
+          if sn verify; then
+            echo "::error::verify did not notice the skill gained agent.spawn"
+            exit 1
+          fi
+          echo "drift correctly detected"

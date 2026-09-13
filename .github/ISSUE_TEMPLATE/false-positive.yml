@@ -1,0 +1,50 @@
+name: False positive — a rule is too noisy
+description: A finding is wrong, or a rule fires on something harmless
+title: "false positive: "
+labels: ["false-positive", "detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Noise is what gets security tooling switched off, so this matters as
+        much as a missed detection.
+
+        Note the two escape hatches before filing, in case one fits: a
+        per-rule severity override or `"off"` in `skillnotary.config.json`, and
+        `ignore` globs for paths that should never be scanned. If neither is
+        right, that is worth reporting too.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id
+      description: The `Rxxx` id from the output.
+      placeholder: R009
+    validations:
+      required: true
+  - type: textarea
+    id: snippet
+    attributes:
+      label: The text that triggered it
+      description: The exact line, with anything sensitive redacted.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this is harmless
+      description: Explain the legitimate reading of the text.
+    validations:
+      required: true
+  - type: dropdown
+    id: fix
+    attributes:
+      label: What would fix it for you?
+      options:
+        - Narrow the rule's pattern
+        - Scope the rule differently (code vs prose)
+        - Lower the severity
+        - Add a suppression guard
+        - Not sure — up to you
+    validations:
+      required: true

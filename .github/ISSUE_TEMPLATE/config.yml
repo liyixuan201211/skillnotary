@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/liyixuan201211/skillnotary/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue. See SECURITY.md.
+  - name: Question or idea
+    url: https://github.com/liyixuan201211/skillnotary/discussions
+    about: Ask a question or float an idea before writing code.

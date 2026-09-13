@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { analyzeSkill, countBySeverity, worstSeverity } from "./analyze.ts";
@@ -188,6 +188,15 @@ function policyPath(cwd: string): string {
   return join(cwd, POLICY_FILENAME);
 }
 
+/**
+ * Paths in output should be readable. Show something relative to the project
+ * when it is inside it, and the absolute path only when it genuinely is not.
+ */
+function displayPath(cwd: string, path: string): string {
+  const rel = relative(cwd, path);
+  return rel === "" || rel.startsWith("..") ? path : rel;
+}
+
 interface AttestationStatus {
   present: boolean;
   valid: boolean;
@@ -364,7 +373,8 @@ function cmdApply(ctx: Context): number {
   });
 
   console.log(
-    R.bold(dryRun ? "apply (dry run)" : "apply", color) + R.dim(`  target=${target.name} -> ${result.targetDir}`, color),
+    R.bold(dryRun ? "apply (dry run)" : "apply", color) +
+      R.dim(`  target=${target.name} -> ${displayPath(cwd, result.targetDir)}`, color),
   );
   for (const warning of result.warnings) {
     console.log(R.dim(`  ! ${sanitizeForTerminal(warning)}`, color));
@@ -432,7 +442,7 @@ function cmdFix(ctx: Context): number {
     for (const line of plan.added) console.log(R.ok(`  + ${sanitizeForTerminal(line)}`, color));
 
     if (!dryRun && writeFixSafe(plan)) {
-      console.log(R.dim(`  wrote ${plan.file}`, color));
+      console.log(R.dim(`  wrote ${displayPath(cwd, plan.file)}`, color));
     }
     changed++;
   }
@@ -817,7 +827,7 @@ function cmdKeygen(ctx: Context): number {
   }
   const keys = generateKeyPair();
   writeKeyFile(out, keys);
-  console.log(`${R.ok("wrote", color)} ${out} ${R.dim("(keep the private key secret)", color)}`);
+  console.log(`${R.ok("wrote", color)} ${displayPath(cwd, out)} ${R.dim("(keep the private key secret)", color)}`);
   console.log(`  keyId      ${keyId(keys.publicKey)}`);
   console.log(`  publicKey  ${keys.publicKey}`);
   return 0;
@@ -856,7 +866,7 @@ function cmdSign(ctx: Context): number {
   writeFileSync(out, `${JSON.stringify(attestation, null, 2)}\n`, "utf8");
 
   const signature = attestation.signatures[0];
-  console.log(`${R.ok("signed", color)} ${LOCKFILE_FILENAME} -> ${out}`);
+  console.log(`${R.ok("signed", color)} ${LOCKFILE_FILENAME} -> ${displayPath(cwd, out)}`);
   console.log(`  format   DSSE (${attestation.payloadType})`);
   console.log(`  keyId    ${signature?.keyid ?? "?"}`);
   console.log(`  subject  sha256:${sha256Hex(lockBytes).slice(0, 24)}...`);
@@ -882,7 +892,7 @@ function cmdSbom(ctx: Context): number {
   const out = str(values, "out");
   if (out) {
     writeFileSync(resolve(cwd, out), json, "utf8");
-    console.log(`${R.ok("wrote", color)} ${out} ${R.dim(`(${sbom.components.length} components)`, color)}`);
+    console.log(`${R.ok("wrote", color)} ${displayPath(cwd, resolve(cwd, out))} ${R.dim(`(${sbom.components.length} components)`, color)}`);
   } else {
     process.stdout.write(json);
   }

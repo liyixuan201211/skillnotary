@@ -1,0 +1,43 @@
+name: False negative — a skill slipped through
+description: skillnotary reported nothing, but a skill is dangerous
+title: "false negative: "
+labels: ["false-negative", "detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most useful bug report you can file. A detection gap is a
+        real gap in the tool's only job.
+
+        Please **redact anything sensitive** — no real credentials or private
+        URLs.
+  - type: textarea
+    id: skill
+    attributes:
+      label: Minimal skill that should have been flagged
+      description: The smallest `SKILL.md` (or script) that reproduces it.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have been reported
+      description: Which capability (exec, network, secrets, destructive, ...) or which rule you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What was actually reported
+      description: Paste `skillnotary audit` output. Use `--json` if it is long.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: skillnotary version
+      description: Output of `skillnotary --version`.
+    validations:
+      required: true

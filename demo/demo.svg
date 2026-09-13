@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="964" height="1034" viewBox="0 0 964 1034" role="img" aria-label="skillnotary — capability drift">
+<rect x="0.5" y="0.5" width="963" height="1033" rx="10" fill="#0d1117" stroke="#30363d"/>
+<path d="M0.5 10a10 10 0 0 1 10-10h943a10 10 0 0 1 10 10v24.0H0.5z" fill="#161b22"/>
+<circle cx="20" cy="19.0" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="19.0" r="6" fill="#febc2e"/>
+<circle cx="60" cy="19.0" r="6" fill="#28c840"/>
+<text x="482.0" y="23.0" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" text-anchor="middle">skillnotary — capability drift</text>
+<g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.0" xml:space="preserve">
+<text x="22.0" y="54.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">$ skillnotary add ./release-notes --name release-notes</tspan></text>
+<text x="22.0" y="74.0" xml:space="preserve" style="white-space:pre"><tspan fill="#3fb950">added</tspan><tspan fill="#c9d1d9" font-weight="600"> release-notes</tspan><tspan fill="#c9d1d9" opacity="0.62"> from ./release-notes</tspan></text>
+<text x="22.0" y="94.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">release-notes</tspan><tspan fill="#c9d1d9" opacity="0.62"> (2 files, 282 B)</tspan></text>
+<text x="22.0" y="114.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  integrity   sha256:eBe4qHXFFicSuu9</tspan></text>
+<text x="22.0" y="134.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  license     MIT</tspan></text>
+<text x="22.0" y="154.0" xml:space="preserve" style="white-space:pre"><tspan fill="#d29922">  declared    exec</tspan><tspan fill="#c9d1d9">, fs.read</tspan></text>
+<text x="22.0" y="174.0" xml:space="preserve" style="white-space:pre"><tspan fill="#d29922">  observed    exec</tspan></text>
+<text x="22.0" y="214.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">$ skillnotary lock</tspan></text>
+<text x="22.0" y="234.0" xml:space="preserve" style="white-space:pre"><tspan fill="#3fb950">wrote</tspan><tspan fill="#c9d1d9" opacity="0.62"> skills.lock (1 skills)</tspan></text>
+<text x="22.0" y="274.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" opacity="0.62">  SKILL          INTEGRITY               CAPABILITIES</tspan></text>
+<text x="22.0" y="294.0" xml:space="preserve" style="white-space:pre"><tspan fill="#d29922">  release-notes  sha256:eBe4qHXFFicSuu9  exec</tspan></text>
+<text x="22.0" y="334.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">$ skillnotary sign</tspan></text>
+<text x="22.0" y="354.0" xml:space="preserve" style="white-space:pre"><tspan fill="#3fb950">signed</tspan><tspan fill="#c9d1d9"> skills.lock -&gt; skills.lock.attestation.json</tspan></text>
+<text x="22.0" y="374.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  format   DSSE (application/vnd.in-toto+json)</tspan></text>
+<text x="22.0" y="394.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  keyId    ed25519:22eb7fb4b6bb078e</tspan></text>
+<text x="22.0" y="414.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  subject  sha256:160958f1fee86731a91c7789...</tspan></text>
+<text x="22.0" y="434.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" opacity="0.62">  predicate covers 1 skill(s) and the config digest</tspan></text>
+<text x="22.0" y="474.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">$ skillnotary verify</tspan></text>
+<text x="22.0" y="494.0" xml:space="preserve" style="white-space:pre"><tspan fill="#3fb950">✓ 1 skill(s) match skills.lock</tspan></text>
+<text x="22.0" y="514.0" xml:space="preserve" style="white-space:pre"><tspan fill="#3fb950">✓ skills.lock attestation is valid</tspan><tspan fill="#c9d1d9" opacity="0.62"> (ed25519:22eb7fb4b6bb078e, DSSE)</tspan></text>
+<text x="22.0" y="554.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600"># ...two weeks later, upstream edits the skill you approved</tspan></text>
+<text x="22.0" y="594.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">$ skillnotary verify</tspan></text>
+<text x="22.0" y="614.0" xml:space="preserve" style="white-space:pre"><tspan fill="#ff7b72">✗ 2 drift(s) detected:</tspan></text>
+<text x="22.0" y="634.0" xml:space="preserve" style="white-space:pre"><tspan fill="#ff7b72">  ✗</tspan><tspan fill="#c9d1d9" font-weight="600"> release-notes</tspan><tspan fill="#c9d1d9" opacity="0.62"> [integrity-changed]</tspan><tspan fill="#c9d1d9"> content digest changed: eBe4qHXFFicS -&gt; Cj7/IuwNp3Gb</tspan></text>
+<text x="22.0" y="654.0" xml:space="preserve" style="white-space:pre"><tspan fill="#ff7b72">  ✗</tspan><tspan fill="#c9d1d9" font-weight="600"> release-notes</tspan><tspan fill="#c9d1d9" opacity="0.62"> [capabilities-changed]</tspan><tspan fill="#c9d1d9"> capabilities changed: [exec] -&gt; [agent.spawn,exec]</tspan></text>
+<text x="22.0" y="674.0" xml:space="preserve" style="white-space:pre"><tspan fill="#3fb950">✓ skills.lock attestation is valid</tspan><tspan fill="#c9d1d9" opacity="0.62"> (ed25519:22eb7fb4b6bb078e, DSSE)</tspan></text>
+<text x="22.0" y="714.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">$ skillnotary audit</tspan></text>
+<text x="22.0" y="734.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" font-weight="600">release-notes</tspan><tspan fill="#c9d1d9" opacity="0.62"> (2 files, 393 B)</tspan></text>
+<text x="22.0" y="754.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  integrity   sha256:Cj7/IuwNp3Gbe3O</tspan></text>
+<text x="22.0" y="774.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9">  license     MIT</tspan></text>
+<text x="22.0" y="794.0" xml:space="preserve" style="white-space:pre"><tspan fill="#d29922">  declared    exec</tspan><tspan fill="#c9d1d9">, fs.read</tspan></text>
+<text x="22.0" y="814.0" xml:space="preserve" style="white-space:pre"><tspan fill="#d29922">  observed    exec</tspan><tspan fill="#c9d1d9">, agent.spawn</tspan></text>
+<text x="22.0" y="834.0" xml:space="preserve" style="white-space:pre"><tspan fill="#ff7b72">  HIGH    </tspan><tspan fill="#c9d1d9" font-weight="600"> R001</tspan><tspan fill="#c9d1d9" opacity="0.62"> Undeclared capability (release-notes SKILL.md)</tspan></text>
+<text x="22.0" y="854.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" opacity="0.62">           Skill declares [Bash(git log *), Read] but its content exercises `agent.spawn`, which those tools do not</tspan></text>
+<text x="22.0" y="874.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" opacity="0.62">grant. Either tighten the skill or declare the capability.</tspan></text>
+<text x="22.0" y="894.0" xml:space="preserve" style="white-space:pre"><tspan fill="#d29922">  MEDIUM  </tspan><tspan fill="#c9d1d9" font-weight="600"> R015</tspan><tspan fill="#c9d1d9" opacity="0.62"> Launches another agent (release-notes SKILL.md:19)</tspan></text>
+<text x="22.0" y="914.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" opacity="0.62">           Spawns a further agent or sub-agent. This expands what can run beyond what the reviewer can see in this</tspan></text>
+<text x="22.0" y="934.0" xml:space="preserve" style="white-space:pre"><tspan fill="#c9d1d9" opacity="0.62">skill alone.</tspan></text>
+<text x="22.0" y="954.0" xml:space="preserve" style="white-space:pre"><tspan fill="#8b949e">           &gt; claude --print &quot;summarise the last 200 commits&quot;</tspan></text>
+<text x="22.0" y="994.0" xml:space="preserve" style="white-space:pre"><tspan fill="#ff7b72">✗ findings at or above &quot;high&quot; (worst: high)</tspan></text>
+</g>
+</svg>
