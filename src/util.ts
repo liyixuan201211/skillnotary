@@ -1,9 +1,32 @@
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  lstatSync,
+  statSync,
+} from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 /** Directories that never contribute to a skill digest. */
 export const IGNORED_DIRS = new Set([".git", "node_modules", ".skillnotary", ".DS_Store"]);
+
+/**
+ * Hard limits so a hostile skill cannot exhaust memory or CPU.
+ * A skill is untrusted input; everything it can make us do has to be bounded.
+ */
+export const LIMITS = {
+  /** Refuse to analyse a skill with more entries than this. */
+  maxFiles: 20_000,
+  /** Only the first N bytes of a file are pattern-scanned. */
+  maxScanBytesPerFile: 1024 * 1024,
+  /** Total bytes pattern-scanned across one skill. */
+  maxScanBytesTotal: 64 * 1024 * 1024,
+  /** Total bytes hashed for one skill digest. */
+  maxDigestBytes: 512 * 1024 * 1024,
+} as const;
 
 export function sha256Hex(input: string | Uint8Array): string {
   return createHash("sha256").update(input).digest("hex");
@@ -47,10 +70,30 @@ export function isDirectory(path: string): boolean {
   }
 }
 
-/** Recursively list files under `root`, relative and POSIX-separated, sorted. */
-export function walkFiles(root: string): string[] {
-  const out: string[] = [];
+export interface WalkResult {
+  /** Regular files, relative + POSIX-separated, sorted. */
+  files: string[];
+  /** Symlinks, relative + POSIX-separated, sorted. Never followed. */
+  symlinks: string[];
+  /** True when the walk stopped early because `maxFiles` was reached. */
+  truncated: boolean;
+}
+
+/**
+ * Walk a directory tree, never following a symlink.
+ *
+ * Symlinks are *reported* rather than traversed. Following them would let a
+ * skill read (and digest) files outside its own directory — a `link -> ~/.ssh`
+ * entry is enough — and a self-referential link would recurse until the OS
+ * path limit stopped it.
+ */
+export function walkTree(root: string, maxFiles: number = LIMITS.maxFiles): WalkResult {
+  const files: string[] = [];
+  const symlinks: string[] = [];
+  let truncated = false;
+
   const visit = (dir: string): void => {
+    if (truncated) return;
     let entries: string[];
     try {
       entries = readdirSync(dir);
@@ -59,19 +102,51 @@ export function walkFiles(root: string): string[] {
     }
     for (const entry of entries) {
       if (IGNORED_DIRS.has(entry)) continue;
+      if (files.length + symlinks.length >= maxFiles) {
+        truncated = true;
+        return;
+      }
       const full = join(dir, entry);
       let st;
       try {
-        st = statSync(full);
+        st = lstatSync(full); // lstat, not stat: never follow
       } catch {
         continue;
       }
+      const rel = relative(root, full).split(sep).join("/");
+      if (st.isSymbolicLink()) {
+        symlinks.push(rel);
+        continue;
+      }
       if (st.isDirectory()) visit(full);
-      else if (st.isFile()) out.push(relative(root, full).split(sep).join("/"));
+      else if (st.isFile()) files.push(rel);
     }
   };
+
   visit(root);
-  return out.sort();
+  return { files: files.sort(), symlinks: symlinks.sort(), truncated };
+}
+
+/** Recursively list regular files under `root`, following no symlinks. */
+export function walkFiles(root: string): string[] {
+  return walkTree(root).files;
+}
+
+/**
+ * Make untrusted text safe to print to a terminal.
+ *
+ * A skill is untrusted content and its text lands in our report. Without this,
+ * a skill can embed ANSI escapes to erase or rewrite the very lines that
+ * describe it (`ESC[2K` plus a carriage return), i.e. forge its own audit
+ * result. Control characters are replaced with U+FFFD so the tampering stays
+ * visible instead of being silently dropped.
+ */
+export function sanitizeForTerminal(input: string): string {
+  return input
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "\uFFFD")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u206A-\u206F\uFEFF\u2028\u2029]/g, "\uFFFD")
+    .replace(/[\u{E0000}-\u{E007F}]/gu, "\uFFFD");
 }
 
 /**

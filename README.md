@@ -30,9 +30,12 @@ markdown-formatter (1 file, 587 B)
 
 *(Output above is trimmed — the full report lists 9 findings.)*
 
-> **Status: v0.1.0.** Early, but it runs, it is tested (51 tests), and it is
-> typechecked under `strict`. See [Threat model](#threat-model-what-this-does-not-do)
-> for exactly what it does and does not protect against.
+> **Status: v0.1.0.** Early, but it runs, it is tested (73 tests), and it is
+> typechecked under `strict`. It has also been through an internal security
+> audit — [SECURITY-AUDIT.md](SECURITY-AUDIT.md) — whose findings are fixed and
+> each covered by a regression test. See
+> [Threat model](#threat-model-what-this-does-not-do) for exactly what it does
+> and does not protect against.
 
 ---
 
@@ -173,6 +176,11 @@ and a `critical`.
 | `P007` | a forbidden capability is exercised by a locked skill |
 | `P008` | a capability in `requireDeclared` is used but not declared |
 | `P009` | a finding is at or above `maxSeverity` |
+| `P010` | `skills.lock` still agrees with a fresh analysis (no drift) |
+
+`P007` and `P008` are evaluated against **freshly observed** capabilities, not
+against the lockfile's own claims. The lockfile is evidence, not an authority —
+otherwise deleting a line from `skills.lock` would be enough to pass the gate.
 
 Default when no policy file exists: `requireLock: true`, `maxSeverity: "high"`.
 
@@ -215,7 +223,8 @@ escalation · `R007` runtime install · `R008` obfuscated payload · `R009`
 coercive/covert instruction · `R010` hidden or bidi Unicode · `R011` writes
 outside the project · `R001` undeclared capability · `R015` launches another
 agent · `R016` no `SKILL.md` · `R017` no license · `R021` no declared
-permissions · `R022` skips user confirmation.
+permissions · `R022` skips user confirmation · `R023` symlink in skill ·
+`R024` skill too large to review fully · `R025` scan truncated.
 
 ### Two things we do to avoid crying wolf
 
@@ -244,6 +253,11 @@ Being explicit, because a security tool that overstates itself is worse than non
 - **Static analysis is heuristic.** Rules are regexes over text, informed by
   context. Determined obfuscation will evade them. Treat findings as review
   prompts, and a clean report as *absence of known signals*, not a guarantee.
+- **The scan is capped, and it says so.** Files are read to a head limit
+  (1 MB each, 64 MB per skill) and directory walks stop at 20 000 entries. When
+  that happens you get `R025` / `R024` instead of a silent gap — because silent
+  truncation would itself be a bypass. The integrity digest still covers every
+  byte, so capping the *scan* does not weaken the digest.
 - **Signatures cover `skills.lock`, not the skills themselves.** Signing attests
   "this lockfile, with these digests, was approved by this key". The digests are
   what tie that to the content.
@@ -277,6 +291,28 @@ Being explicit, because a security tool that overstates itself is worse than non
 - A rule plug-in API, so orgs can add their own signals
 - `--fix` for the mechanical findings (declare `allowed-tools` from observed)
 - Cross-harness install/apply (`skillnotary apply` from the lock)
+
+## Security
+
+A review tool has to survive the content it reviews, so the whole of v0.1.0 was
+audited: [SECURITY-AUDIT.md](SECURITY-AUDIT.md) documents **eight findings — all
+fixed, each with a regression test** in `test/security-fixes.test.ts`, plus the
+hypotheses that were tested and disproved.
+
+The guarantees the code is written to uphold:
+
+1. **Never follow a symlink** out of a skill directory (`R023` reports them).
+2. **Never let manifest content become an option** to `git` (transport
+   allowlist, `--` separator, `-`-prefixed URLs and refs refused).
+3. **Never trust the lockfile over fresh observation** when enforcing policy.
+4. **Never print untrusted bytes verbatim** to a terminal — ANSI, bidi,
+   zero-width and Unicode-tag characters are neutralised with U+FFFD.
+5. **Never let a skill cause unbounded work** — every read, walk and match is
+   capped, and truncation is reported.
+6. **Never default a security-relevant field** — a lockfile missing
+   `capabilities` is an error, not an empty list.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 

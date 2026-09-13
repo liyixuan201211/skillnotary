@@ -1,7 +1,15 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readdirSync,
+  readlinkSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { digestTree } from "./hash.ts";
-import { readTextFileSafe, walkFiles } from "./util.ts";
+import { LIMITS, readTextFileSafe, walkTree } from "./util.ts";
 import { RULES, SHELL_LANGUAGES, SIGNIFICANT_CAPABILITIES, TOOL_CAPABILITY_MAP } from "./patterns.ts";
 import type { Rule } from "./patterns.ts";
 import { ALL_CAPABILITIES } from "./types.ts";
@@ -142,7 +150,12 @@ export function parseFrontmatter(content: string): Frontmatter {
   }
   if (end === -1) return { data: {}, body: content, present: false };
 
-  const data: Record<string, string | string[]> = {};
+  // Null-prototype map: frontmatter keys come from an untrusted file, so it
+  // must not be possible for `__proto__` / `constructor` to reach Object.prototype.
+  const data: Record<string, string | string[]> = Object.create(null) as Record<
+    string,
+    string | string[]
+  >;
   let listKey: string | null = null;
 
   for (const raw of lines.slice(1, end)) {
@@ -293,6 +306,29 @@ function looksBinary(buf: Buffer): boolean {
   return false;
 }
 
+/**
+ * Read at most `maxBytes` from the head of a file.
+ *
+ * Only the head is ever pattern-scanned. A skill must not be able to make us
+ * slurp an arbitrarily large file into memory just to run regexes over it.
+ */
+function readHead(path: string, maxBytes: number): Buffer {
+  const fd = openSync(path, "r");
+  try {
+    const size = Math.min(Number(fstatSync(fd).size), maxBytes);
+    const buf = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const n = readSync(fd, buf, read, size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    return read === size ? buf : buf.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function isScannable(relPath: string): boolean {
   const base = relPath.split("/").pop() ?? "";
   if (TEXT_BASENAMES.has(base)) return true;
@@ -341,7 +377,10 @@ export interface AnalyzeOptions {
  * raise findings.
  */
 export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAnalysis {
-  const files = walkFiles(dir);
+  const tree = walkTree(dir);
+  const files = tree.files;
+  const scanTruncated: string[] = [];
+  let scannedBytes = 0;
   const findings: Finding[] = [];
   const observed = new Set<CapabilityId>();
   let description: string | null = null;
@@ -353,14 +392,29 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
 
   for (const rel of files) {
     const abs = join(dir, rel);
+    if (!isScannable(rel)) continue;
+
+    if (scannedBytes >= LIMITS.maxScanBytesTotal) {
+      scanTruncated.push(rel);
+      continue;
+    }
+
+    let fileSize = 0;
+    try {
+      fileSize = statSync(abs).size;
+    } catch {
+      continue;
+    }
+    if (fileSize > LIMITS.maxScanBytesPerFile) scanTruncated.push(rel);
+
     let buf: Buffer;
     try {
-      buf = readFileSync(abs);
+      buf = readHead(abs, LIMITS.maxScanBytesPerFile);
     } catch {
       continue;
     }
     if (looksBinary(buf)) continue;
-    if (!isScannable(rel)) continue;
+    scannedBytes += buf.byteLength;
 
     const content = buf.toString("utf8");
     const isSkillMd = /^skill\.md$/i.test(rel);
@@ -422,6 +476,46 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
         });
       }
     }
+  }
+
+  // -------------------------------------------------------- structural rules
+  // Symlinks are reported but never followed: a link pointing outside the skill
+  // is a way to make review tooling read files it has no business reading.
+  for (const rel of tree.symlinks) {
+    let target = "";
+    try {
+      target = readlinkSync(join(dir, rel));
+    } catch {
+      /* unreadable link */
+    }
+    const escapes = target.startsWith("/") || target.split(/[/\\]/).includes("..");
+    findings.push({
+      rule: "R023",
+      severity: escapes ? "high" : "medium",
+      title: "Symlink in skill",
+      detail: `Found a symlink (${rel} -> ${target === "" ? "?" : target}). skillnotary does not follow symlinks, so the target was neither read nor hashed. A link that points outside the skill is a way to make tooling read files it should not.`,
+      file: rel,
+    });
+  }
+
+  if (tree.truncated) {
+    findings.push({
+      rule: "R024",
+      severity: "high",
+      title: "Skill too large to review fully",
+      detail: `The skill has at least ${LIMITS.maxFiles} entries, so the walk stopped early. The findings below are incomplete and a payload could sit beyond the limit.`,
+      file: ".",
+    });
+  }
+
+  if (scanTruncated.length > 0) {
+    findings.push({
+      rule: "R025",
+      severity: "medium",
+      title: "Scan truncated",
+      detail: `${scanTruncated.length} file(s) exceeded the scan budget and were only read in part (${Math.round(LIMITS.maxScanBytesPerFile / 1048576)} MB per file, ${Math.round(LIMITS.maxScanBytesTotal / 1048576)} MB total). Findings for those files may be incomplete.`,
+      file: scanTruncated[0] ?? ".",
+    });
   }
 
   // ---------------------------------------------------------- composite rules

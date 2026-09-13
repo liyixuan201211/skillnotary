@@ -102,7 +102,7 @@ export const RULES: Rule[] = [
     scope: "code",
     capability: "exec",
     pattern:
-      /\bbase64\s+(?:-d|-D|--decode)\b|\batob\s*\(|\bBuffer\.from\s*\([^)]*['"]base64['"]|(?:eval|exec|Function)\s*\(\s*(?:atob|Buffer\.from|base64|decode)|codecs\.decode\s*\([^)]*base64|[A-Za-z0-9+/]{300,}={0,2}/,
+      /\bbase64\s+(?:-d|-D|--decode)\b|\batob\s*\(|\bBuffer\.from\s*\([^)]*['"]base64['"]|(?:eval|exec|Function)\s*\(\s*(?:atob|Buffer\.from|base64|decode)|codecs\.decode\s*\([^)]*base64|[A-Za-z0-9+/]{300,4096}={0,2}/,
   },
   {
     id: "R009",

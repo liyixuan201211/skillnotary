@@ -1,5 +1,5 @@
 import type { CapabilityId, Finding, Severity, SkillAnalysis } from "./types.ts";
-import { formatBytes, sri } from "./util.ts";
+import { formatBytes, sanitizeForTerminal, sri } from "./util.ts";
 import type { Drift } from "./lockfile.ts";
 import type { PolicyViolation } from "./types.ts";
 
@@ -74,6 +74,15 @@ export function renderCapabilities(caps: CapabilityId[], color: boolean): string
     .join(", ");
 }
 
+/**
+ * Everything a skill can influence goes through here before it is printed.
+ *
+ * `bold`/`dim`/`paint` only add *our* escapes; they do nothing about escapes
+ * that arrived inside a skill. Without sanitising, a skill could embed ANSI
+ * control sequences and rewrite the lines that report on it.
+ */
+const safe = sanitizeForTerminal;
+
 export function formatFindings(
   findings: Finding[],
   skillName: string,
@@ -84,12 +93,12 @@ export function formatFindings(
   if (visible.length === 0) return "";
   const lines: string[] = [];
   for (const f of visible) {
-    const location = `${f.file}${f.line !== undefined ? `:${f.line}` : ""}`;
+    const location = safe(`${f.file}${f.line !== undefined ? `:${f.line}` : ""}`);
     lines.push(
-      `  ${severityTag(f.severity, color)} ${bold(f.rule, color)} ${f.title} ${dim(`(${skillName} ${location})`, color)}`,
+      `  ${severityTag(f.severity, color)} ${bold(f.rule, color)} ${safe(f.title)} ${dim(`(${safe(skillName)} ${location})`, color)}`,
     );
-    lines.push(`           ${dim(f.detail, color)}`);
-    if (f.evidence) lines.push(`           ${paint(`> ${f.evidence}`, ANSI.gray, color)}`);
+    lines.push(`           ${dim(safe(f.detail), color)}`);
+    if (f.evidence) lines.push(`           ${paint(`> ${safe(f.evidence)}`, ANSI.gray, color)}`);
   }
   return lines.join("\n");
 }
@@ -103,10 +112,10 @@ export function formatAnalysisSummary(
   const name = displayName ?? analysis.name;
   const lines: string[] = [];
   lines.push(
-    `${bold(name, color)} ${dim(`(${analysis.files} ${pluralize(analysis.files, "file")}, ${formatBytes(analysis.bytes)})`, color)}`,
+    `${bold(safe(name), color)} ${dim(`(${analysis.files} ${pluralize(analysis.files, "file")}, ${formatBytes(analysis.bytes)})`, color)}`,
   );
   lines.push(`  integrity   ${shortIntegrity(analysis.integrity)}`);
-  lines.push(`  license     ${analysis.license ?? dim("none", color)}`);
+  lines.push(`  license     ${analysis.license === null ? dim("none", color) : safe(analysis.license)}`);
   lines.push(`  declared    ${renderCapabilities(analysis.declared.capabilities, color)}`);
   lines.push(`  observed    ${renderCapabilities(analysis.observed, color)}`);
   return lines.join("\n");
@@ -115,14 +124,17 @@ export function formatAnalysisSummary(
 export function formatDrifts(drifts: Drift[], color: boolean): string {
   if (drifts.length === 0) return "";
   return drifts
-    .map((d) => `  ${bad("✗", color)} ${bold(d.name, color)} ${dim(`[${d.kind}]`, color)} ${d.detail}`)
+    .map(
+      (d) =>
+        `  ${bad("✗", color)} ${bold(safe(d.name), color)} ${dim(`[${d.kind}]`, color)} ${safe(d.detail)}`,
+    )
     .join("\n");
 }
 
 export function formatViolations(violations: PolicyViolation[], color: boolean): string {
   if (violations.length === 0) return "";
   return violations
-    .map((v) => `  ${bad("✗", color)} ${bold(v.rule, color)} ${v.message}`)
+    .map((v) => `  ${bad("✗", color)} ${bold(v.rule, color)} ${safe(v.message)}`)
     .join("\n");
 }
 
@@ -142,7 +154,7 @@ export function formatLockTable(
   ];
   for (const row of rows) {
     lines.push(
-      `  ${row.name.padEnd(nameWidth)}  ${shortIntegrity(row.integrity).padEnd(integWidth)}  ${renderCapabilities(row.capabilities, color)}`,
+      `  ${safe(row.name).padEnd(nameWidth)}  ${shortIntegrity(row.integrity).padEnd(integWidth)}  ${renderCapabilities(row.capabilities, color)}`,
     );
   }
   return lines.join("\n");

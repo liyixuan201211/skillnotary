@@ -49,6 +49,17 @@ export interface PolicyInput {
   findingsBySkill: Map<string, Finding[]>;
   /** Whether an attestation was found and validated. */
   attestation: { present: boolean; valid: boolean; reason?: string };
+  /**
+   * Freshly observed capabilities, keyed by skill name.
+   *
+   * When present these are authoritative. The lockfile is attacker-writable
+   * (anyone can open a PR against it), so a capability gate that trusted the
+   * lockfile's own claims could be defeated simply by deleting entries from
+   * `skills.lock`.
+   */
+  fresh?: Map<string, { capabilities: CapabilityId[]; declared: CapabilityId[] }>;
+  /** Drift between the committed lockfile and a fresh resolution. */
+  lockDrift?: Array<{ name: string; kind: string; detail: string }>;
 }
 
 export interface PolicyOutcome {
@@ -102,6 +113,16 @@ export function evaluatePolicy(input: PolicyInput): PolicyOutcome {
 
   const skills = lockfile?.skills ?? [];
 
+  // A lockfile that disagrees with the working tree cannot be trusted as the
+  // basis for any capability decision, so surface that before the gates below.
+  for (const drift of input.lockDrift ?? []) {
+    violations.push({
+      rule: "P010",
+      message: `skills.lock does not match the working tree for "${drift.name}" [${drift.kind}]: ${drift.detail}`,
+      skill: drift.name,
+    });
+  }
+
   for (const skill of skills) {
     // 3. Name allow/deny lists.
     if (policy.allowSkills && policy.allowSkills.length > 0) {
@@ -121,13 +142,17 @@ export function evaluatePolicy(input: PolicyInput): PolicyOutcome {
       });
     }
 
-    // 4. Capability gates against what the skill can actually do.
-    const caps = skill.capabilities;
+    // 4. Capability gates. Prefer freshly observed capabilities; the lockfile's
+    //    own list is only a fallback when no fresh analysis was supplied.
+    const freshEntry = input.fresh?.get(skill.name);
+    const observedCaps = freshEntry?.capabilities ?? skill.capabilities;
+    const declaredCaps = freshEntry?.declared ?? skill.declared;
+
     for (const [capability, allowed] of Object.entries(policy.capabilities ?? {}) as Array<
       [CapabilityId, boolean | undefined]
     >) {
       if (allowed !== false) continue;
-      if (!caps.includes(capability)) continue;
+      if (!observedCaps.includes(capability)) continue;
       violations.push({
         rule: "P007",
         message: `skill "${skill.name}" exercises capability "${capability}", which policy forbids`,
@@ -137,7 +162,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyOutcome {
 
     // 5. Capabilities that must be declared, not merely present.
     for (const required of policy.requireDeclared ?? []) {
-      if (caps.includes(required) && !skill.declared.includes(required)) {
+      if (observedCaps.includes(required) && !declaredCaps.includes(required)) {
         violations.push({
           rule: "P008",
           message: `skill "${skill.name}" uses "${required}" but does not declare it in SKILL.md`,

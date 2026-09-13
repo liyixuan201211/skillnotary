@@ -43,6 +43,7 @@ import {
 } from "./attest.ts";
 import { discoverSkills, readSkillName } from "./discover.ts";
 import { CACHE_DIRNAME, resolveSpec } from "./source.ts";
+import { sanitizeForTerminal } from "./util.ts";
 import { VERSION } from "./version.ts";
 import * as R from "./report.ts";
 import type { Finding, Severity } from "./types.ts";
@@ -236,7 +237,9 @@ function cmdAdd(ctx: Context): number {
 
   writeManifest(mPath, upsertSkill(manifest, { name, source }));
 
-  console.log(`${R.ok("added", color)} ${R.bold(name, color)} ${R.dim(`from ${source}`, color)}`);
+  console.log(
+    `${R.ok("added", color)} ${R.bold(sanitizeForTerminal(name), color)} ${R.dim(`from ${sanitizeForTerminal(source)}`, color)}`,
+  );
   console.log(R.formatAnalysisSummary(analysis, { color }, name));
   const counts = countBySeverity(analysis.findings);
   if (counts.critical + counts.high > 0) {
@@ -272,7 +275,7 @@ function cmdLock(ctx: Context): number {
     refresh: bool(values, "refresh"),
   });
 
-  for (const warning of warnings) console.log(R.dim(`note: ${warning}`, color));
+  for (const warning of warnings) console.log(R.dim(`note: ${sanitizeForTerminal(warning)}`, color));
 
   const lPath = lockfilePath(cwd);
   const committed = readLockfile(lPath);
@@ -440,12 +443,25 @@ function cmdPolicy(ctx: Context): number {
     refresh: bool(values, "refresh"),
   });
 
+  // Policy is evaluated against what is on disk right now. `skills.lock` is
+  // attacker-writable, so its capability claims only count while they still
+  // agree with a fresh analysis; otherwise P010 fires.
+  const freshCaps = new Map(
+    [...analyses].map(([name, analysis]) => [
+      name,
+      { capabilities: analysis.observed, declared: analysis.declared.capabilities },
+    ]),
+  );
+  const lockDrift = committed ? diffLockfiles(committed, fresh) : [];
+
   const att = checkAttestation(cwd);
   const outcome = evaluatePolicy({
     policy,
     lockfile: committed ?? fresh,
     findingsBySkill: readFindingsBySkill(analyses),
     attestation: { present: att.present, valid: att.valid, ...(att.reason ? { reason: att.reason } : {}) },
+    fresh: freshCaps,
+    lockDrift,
   });
 
   for (const note of outcome.notes) console.log(R.dim(`· ${note}`, color));
@@ -544,11 +560,16 @@ function cmdDiscover(ctx: Context): number {
   console.log(R.dim(`  ${"SKILL".padEnd(nameWidth)}  HARNESS              SCOPE`, color));
   for (const skill of found) {
     console.log(
-      `  ${skill.name.padEnd(nameWidth)}  ${skill.harness.padEnd(20)} ${skill.scope}`,
+      `  ${sanitizeForTerminal(skill.name).padEnd(nameWidth)}  ${skill.harness.padEnd(20)} ${skill.scope}`,
     );
   }
   console.log("");
-  console.log(R.dim(`${found.length} skill(s). Add one with: skillnotary add ${found[0]?.dir ?? "<path>"}`, color));
+  console.log(
+    R.dim(
+      `${found.length} skill(s). Add one with: skillnotary add ${sanitizeForTerminal(found[0]?.dir ?? "<path>")}`,
+      color,
+    ),
+  );
   return 0;
 }
 

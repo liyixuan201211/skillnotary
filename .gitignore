@@ -3,3 +3,9 @@ node_modules/
 *.log
 .DS_Store
 dist/
+
+# Never commit signing material. `skillnotary keygen` writes its keyfile next to
+# your project by default, so without this it is one `git add -A` away from
+# leaking the key that attests your lockfile.
+skillnotary.key.json
+*.key.json

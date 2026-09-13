@@ -4,18 +4,120 @@ import { resolveSpec, CACHE_DIRNAME } from "./source.ts";
 import { GENERATOR } from "./version.ts";
 import { canonicalJson, readTextFileSafe, writeTextFile } from "./util.ts";
 import { join } from "node:path";
-import type { Lockfile, LockedSkill, Manifest, SkillAnalysis } from "./types.ts";
+import type { Lockfile, LockedSkill, Manifest, SkillAnalysis, CapabilityId } from "./types.ts";
+import { ALL_CAPABILITIES } from "./types.ts";
 
 export const LOCKFILE_FILENAME = "skills.lock";
 
 export function readLockfile(path: string): Lockfile | null {
   const raw = readTextFileSafe(path);
   if (raw === null) return null;
-  const parsed = JSON.parse(raw) as Partial<Lockfile>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${LOCKFILE_FILENAME} is not valid JSON`);
+  }
+  return normalizeLockfile(parsed);
+}
+
+function fail(message: string): never {
+  throw new Error(`${LOCKFILE_FILENAME}: ${message}`);
+}
+
+function asCapabilityArray(value: unknown, where: string): CapabilityId[] {
+  // Required, not defaulted: a lockfile that simply omits `capabilities` is the
+  // cheapest way to pretend a skill has none, so absence is an error.
+  if (value === undefined) fail(`${where} is missing`);
+  if (!Array.isArray(value)) fail(`${where} must be an array`);
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || !(ALL_CAPABILITIES as readonly string[]).includes(entry)) {
+      fail(`${where}[${index}] is not a known capability`);
+    }
+    return entry as CapabilityId;
+  });
+}
+
+function asStringArray(value: unknown, where: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail(`${where} must be an array`);
+  return value.map((entry, index) => {
+    if (typeof entry !== "string") fail(`${where}[${index}] must be a string`);
+    return entry;
+  });
+}
+
+/**
+ * Validate and normalise a lockfile.
+ *
+ * The lockfile is untrusted input: any contributor can edit it, and `policy`
+ * reads capability claims straight out of it. A malformed or hand-edited file
+ * must therefore produce a clear error — never a crash, and never a silently
+ * empty capability list.
+ */
+export function normalizeLockfile(parsed: unknown): Lockfile {
+  if (typeof parsed !== "object" || parsed === null) fail("must be a JSON object");
+  const record = parsed as Record<string, unknown>;
+
+  const rawSkills = record["skills"];
+  if (!Array.isArray(rawSkills)) fail('is missing a "skills" array');
+
+  const skills: LockedSkill[] = rawSkills.map((entry, index) => {
+    const where = `skills[${index}]`;
+    if (typeof entry !== "object" || entry === null) fail(`${where} must be an object`);
+    const skill = entry as Record<string, unknown>;
+
+    const name = skill["name"];
+    const source = skill["source"];
+    const integrity = skill["integrity"];
+    if (typeof name !== "string" || name === "") fail(`${where}.name must be a non-empty string`);
+    if (typeof source !== "string") fail(`${where}.source must be a string`);
+    if (typeof integrity !== "string" || !integrity.startsWith("sha256-")) {
+      fail(`${where}.integrity must be a "sha256-…" digest`);
+    }
+
+    const resolved = skill["resolved"];
+    if (typeof resolved !== "object" || resolved === null) fail(`${where}.resolved must be an object`);
+    const r = resolved as Record<string, unknown>;
+    if (r["type"] !== "path" && r["type"] !== "git") {
+      fail(`${where}.resolved.type must be "path" or "git"`);
+    }
+    if (typeof r["dir"] !== "string") fail(`${where}.resolved.dir must be a string`);
+
+    const str = (key: string): string | undefined =>
+      typeof r[key] === "string" ? (r[key] as string) : undefined;
+    const url = str("url");
+    const ref = str("ref");
+    const commit = str("commit");
+    const subpath = str("subpath");
+
+    return {
+      name,
+      source,
+      resolved: {
+        type: r["type"],
+        spec: str("spec") ?? source,
+        dir: r["dir"],
+        ...(url !== undefined ? { url } : {}),
+        ...(ref !== undefined ? { ref } : {}),
+        ...(commit !== undefined ? { commit } : {}),
+        ...(subpath !== undefined ? { subpath } : {}),
+      },
+      integrity,
+      files: typeof skill["files"] === "number" ? skill["files"] : 0,
+      bytes: typeof skill["bytes"] === "number" ? skill["bytes"] : 0,
+      capabilities: asCapabilityArray(skill["capabilities"], `${where}.capabilities`),
+      declared: asCapabilityArray(skill["declared"], `${where}.declared`),
+      declaredTools: asStringArray(skill["declaredTools"], `${where}.declaredTools`),
+      license: typeof skill["license"] === "string" ? skill["license"] : null,
+      description: typeof skill["description"] === "string" ? skill["description"] : null,
+    };
+  });
+
   return {
     lockfileVersion: 1,
-    generator: parsed.generator ?? "unknown",
-    skills: Array.isArray(parsed.skills) ? parsed.skills : [],
+    generator: typeof record["generator"] === "string" ? record["generator"] : "unknown",
+    skills,
   };
 }
 

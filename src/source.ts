@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { sha256Hex } from "./util.ts";
 import type { ResolvedSource } from "./types.ts";
 
@@ -102,6 +102,34 @@ export interface ResolveOptions {
   refresh?: boolean;
 }
 
+/** URL schemes we are willing to hand to `git clone`. */
+const ALLOWED_GIT_SCHEMES = /^(?:https?|ssh|git|file):\/\//i;
+/** scp-like syntax, e.g. git@github.com:owner/repo.git */
+const SCP_LIKE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:/;
+
+/**
+ * Validate a git URL that came from a manifest before it reaches `git`.
+ *
+ * `skills.json` is untrusted input (it ships inside the repository you are
+ * reviewing). Two things must never get through:
+ *
+ *  - a URL beginning with `-`, which git would parse as an *option* rather
+ *    than a repository (argument injection), and
+ *  - the `ext::` transport, which executes an arbitrary local command.
+ */
+export function assertSafeGitUrl(url: string): void {
+  if (url === "") throw new Error("git source has an empty URL");
+  if (url.startsWith("-")) {
+    throw new Error(`refusing a git URL that looks like an option: ${url}`);
+  }
+  if (/ext::/i.test(url)) {
+    throw new Error("refusing the git `ext::` transport: it executes local commands");
+  }
+  if (!ALLOWED_GIT_SCHEMES.test(url) && !SCP_LIKE.test(url)) {
+    throw new Error(`unsupported git URL (expected https/ssh/git/file or scp-like): ${url}`);
+  }
+}
+
 /** Resolve a parsed source to a directory on disk plus provenance. */
 export function resolveSource(parsed: ParsedSource, options: ResolveOptions): ResolvedSource {
   if (parsed.kind === "path") {
@@ -113,6 +141,10 @@ export function resolveSource(parsed: ParsedSource, options: ResolveOptions): Re
   }
 
   const url = parsed.url ?? "";
+  assertSafeGitUrl(url);
+  if (parsed.ref !== undefined && parsed.ref.startsWith("-")) {
+    throw new Error(`refusing a ref that looks like an option: ${parsed.ref}`);
+  }
   const key = sha256Hex(url).slice(0, 16);
   const cloneDir = join(options.cacheDir, key);
 
@@ -125,12 +157,13 @@ export function resolveSource(parsed: ParsedSource, options: ResolveOptions): Re
     const shallow = ["clone", "--quiet", "--depth", "1"];
     if (parsed.ref) shallow.push("--branch", parsed.ref);
     try {
-      git([...shallow, url, cloneDir]);
+      // `--` terminates option parsing, so a crafted URL can never be read as a flag.
+      git([...shallow, "--", url, cloneDir]);
     } catch {
       // A pinned commit sha cannot be used with --branch; fall back to a full
       // clone and an explicit checkout.
       rmSync(cloneDir, { recursive: true, force: true });
-      git(["clone", "--quiet", url, cloneDir]);
+      git(["clone", "--quiet", "--", url, cloneDir]);
       if (parsed.ref) git(["checkout", "--quiet", parsed.ref], cloneDir);
     }
   } else if (parsed.ref) {
@@ -149,7 +182,16 @@ export function resolveSource(parsed: ParsedSource, options: ResolveOptions): Re
     commit = undefined;
   }
 
-  const dir = parsed.subpath ? join(cloneDir, parsed.subpath) : cloneDir;
+  // The subpath must stay inside the clone. Without this, `..` in an untrusted
+  // manifest would point the analysis at arbitrary directories on the host.
+  const root = resolve(cloneDir);
+  let dir = root;
+  if (parsed.subpath !== undefined) {
+    dir = resolve(root, parsed.subpath);
+    if (dir !== root && !dir.startsWith(root + sep)) {
+      throw new Error(`subpath escapes the repository: ${parsed.subpath}`);
+    }
+  }
   if (!existsSync(dir)) {
     throw new Error(`subpath not found in ${url}: ${parsed.subpath}`);
   }
