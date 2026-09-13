@@ -1,20 +1,67 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 
-import { generateKeyPair, keyId, signPayload, verifyPayload } from "../src/attest.ts";
+import {
+  buildStatement,
+  DSSE_PAYLOAD_TYPE,
+  generateKeyPair,
+  keyId,
+  pae,
+  signPayload,
+  verifyPayload,
+} from "../src/attest.ts";
 import { buildSbom, sriToHex } from "../src/sbom.ts";
 import { digestTree } from "../src/hash.ts";
+import { sha256Hex, sri } from "../src/util.ts";
 import { makeSkill } from "./helpers.ts";
-import type { Attestation, Lockfile } from "../src/types.ts";
+import type { Attestation, DsseEnvelope, Lockfile } from "../src/types.ts";
 
-test("a signed payload verifies", () => {
+function signRaw(payload: Buffer, privateKeyB64: string): string {
+  const privateKey = createPrivateKey({
+    key: Buffer.from(privateKeyB64, "base64"),
+    format: "der",
+    type: "pkcs8",
+  });
+  return cryptoSign(null, payload, privateKey).toString("base64");
+}
+
+test("a signed payload verifies as a DSSE envelope", () => {
   const keys = generateKeyPair();
   const payload = Buffer.from("skills.lock contents", "utf8");
   const attestation = signPayload(payload, keys, "skills.lock");
 
-  assert.equal(attestation.algorithm, "ed25519");
-  assert.equal(attestation.keyId, keyId(keys.publicKey));
-  assert.equal(verifyPayload(attestation, payload).valid, true);
+  assert.equal(attestation.payloadType, DSSE_PAYLOAD_TYPE);
+  assert.equal(attestation.signatures.length, 1);
+  assert.equal(attestation.signatures[0]?.keyid, keyId(keys.publicKey));
+
+  const result = verifyPayload(attestation, payload);
+  assert.equal(result.valid, true);
+  assert.equal(result.format, "dsse");
+  assert.equal(result.keyId, keyId(keys.publicKey));
+});
+
+test("the statement is in-toto shaped and carries the subject digest", () => {
+  const keys = generateKeyPair();
+  const payload = Buffer.from("lockfile bytes");
+  const statement = buildStatement("skills.lock", payload, keys, {
+    configDigest: "sha256-AAA",
+    skills: [{ name: "pdf", integrity: "sha256-BBB", capabilities: ["exec"] }],
+  });
+
+  assert.equal(statement._type, "https://in-toto.io/Statement/v1");
+  assert.equal(statement.subject[0]?.name, "skills.lock");
+  assert.equal(statement.subject[0]?.digest["sha256"], sha256Hex(payload));
+  assert.equal(statement.predicate.configDigest, "sha256-AAA");
+  assert.equal(statement.predicate.skillCount, 1);
+  assert.deepEqual(statement.predicate.skills[0]?.capabilities, ["exec"]);
+});
+
+test("PAE length-encodes the type and payload", () => {
+  const a = pae("t", Buffer.from("xy"));
+  const b = pae("tx", Buffer.from("y"));
+  assert.notEqual(a.toString("hex"), b.toString("hex"), "the boundaries must be unambiguous");
+  assert.equal(a.toString("utf8"), "DSSEv1 1 t 2 xy");
 });
 
 test("a modified payload fails verification", () => {
@@ -25,25 +72,64 @@ test("a modified payload fails verification", () => {
   assert.match(result.reason ?? "", /changed since it was attested/);
 });
 
-test("a signature from another key fails verification", () => {
+test("swapping the public key inside the statement invalidates the signature", () => {
   const signer = generateKeyPair();
   const attacker = generateKeyPair();
   const payload = Buffer.from("payload");
-  const attestation = signPayload(payload, signer, "skills.lock");
+  const envelope = signPayload(payload, signer, "skills.lock");
 
-  // Swap in the attacker's public key while keeping the signature.
-  const forged: Attestation = { ...attestation, publicKey: attacker.publicKey };
+  const statement = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")) as {
+    predicate: { signer: { publicKey: string } };
+  };
+  statement.predicate.signer.publicKey = attacker.publicKey;
+  const forged: DsseEnvelope = {
+    ...envelope,
+    payload: Buffer.from(JSON.stringify(statement)).toString("base64"),
+  };
   assert.equal(verifyPayload(forged, payload).valid, false);
 });
 
-test("every signature is distinct for the same payload", () => {
+test("a well-formed signature from an untrusted key is identifiable, so trust can pin it", () => {
+  const signer = generateKeyPair();
+  const attacker = generateKeyPair();
+  const payload = Buffer.from("payload");
+
+  const signedByAttacker = signPayload(payload, attacker, "skills.lock");
+  const result = verifyPayload(signedByAttacker, payload);
+  assert.equal(result.valid, true, "the envelope itself is well formed");
+  assert.notEqual(result.keyId, keyId(signer.publicKey), "but it is not the key we trust");
+});
+
+test("ed25519 signatures are deterministic for the same payload", () => {
   const keys = generateKeyPair();
   const payload = Buffer.from("same");
   const a = signPayload(payload, keys, "x");
   const b = signPayload(payload, keys, "x");
-  // ed25519 is deterministic, so the signatures should in fact match.
-  assert.equal(a.signature, b.signature);
+  assert.equal(a.signatures[0]?.sig, b.signatures[0]?.sig);
   assert.equal(verifyPayload(a, payload).valid, true);
+});
+
+test("the legacy attestation format still verifies", () => {
+  const keys = generateKeyPair();
+  const payload = Buffer.from("legacy bytes");
+  const legacy: Attestation = {
+    format: "skillnotary/attestation@1",
+    subject: { name: "skills.lock", digest: sri(payload) },
+    algorithm: "ed25519",
+    keyId: keyId(keys.publicKey),
+    publicKey: keys.publicKey,
+    signature: signRaw(payload, keys.privateKey),
+    signedAt: new Date().toISOString(),
+  };
+
+  const result = verifyPayload(legacy, payload);
+  assert.equal(result.valid, true);
+  assert.equal(result.format, "legacy");
+});
+
+test("an unrecognised attestation format is rejected", () => {
+  const bogus = { hello: "world" } as unknown as Attestation;
+  assert.equal(verifyPayload(bogus, Buffer.from("x")).valid, false);
 });
 
 test("the tree digest is stable and content-sensitive", () => {

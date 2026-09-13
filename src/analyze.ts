@@ -19,6 +19,7 @@ import type {
   Finding,
   Severity,
   SkillAnalysis,
+  SuppressionDirective,
 } from "./types.ts";
 
 /** Extensions we treat as scannable text. */
@@ -372,6 +373,101 @@ export interface AnalyzeOptions {
   skipDigest?: boolean;
 }
 
+/** How much of a file is read purely to classify it. */
+const INSPECT_HEAD_BYTES = 4096;
+
+/** A line longer than this suggests minified, packed or generated content. */
+const OBFUSCATION_LINE_LENGTH = 5000;
+
+/**
+ * Compiled or executable formats. A skill has no reason to ship one, and a
+ * binary cannot be reviewed by reading it, so their presence is a finding in
+ * itself rather than something to silently skip.
+ */
+const EXECUTABLE_EXTENSIONS = new Set([
+  ".exe", ".dll", ".so", ".dylib", ".node", ".bin", ".wasm", ".class", ".jar",
+  ".war", ".pyc", ".pyo", ".o", ".obj", ".a", ".lib", ".dmg", ".pkg", ".deb",
+  ".rpm", ".msi", ".app", ".com", ".scr", ".apk", ".ipa",
+]);
+
+/** Binary types that are legitimate skill assets, so they are not flagged. */
+const SAFE_BINARY_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".svg",
+  ".pdf", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".m4a",
+  ".wav", ".ogg", ".webm", ".mov", ".zip", ".tar", ".gz", ".tgz", ".bz2",
+  ".xz", ".7z", ".rar", ".db", ".sqlite", ".sqlite3",
+]);
+
+function extensionOf(rel: string): string {
+  const base = rel.split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  return dot <= 0 ? "" : base.slice(dot).toLowerCase();
+}
+
+/** Classify an executable/compiled format from its magic bytes. */
+function detectExecutableMagic(buf: Buffer): string | null {
+  const b = buf;
+  if (b.length >= 4 && b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46) {
+    return "an ELF binary";
+  }
+  if (b.length >= 4 && b[0] === 0xfe && b[1] === 0xed && b[2] === 0xfa) return "a Mach-O binary";
+  if (b.length >= 4 && b[0] === 0xcf && b[1] === 0xfa && b[2] === 0xed && b[3] === 0xfe) {
+    return "a Mach-O binary";
+  }
+  if (b.length >= 2 && b[0] === 0x4d && b[1] === 0x5a) return "a PE/Windows executable";
+  if (b.length >= 4 && b[0] === 0x00 && b[1] === 0x61 && b[2] === 0x73 && b[3] === 0x6d) {
+    return "a WebAssembly module";
+  }
+  if (b.length >= 4 && b[0] === 0xca && b[1] === 0xfe && b[2] === 0xba && b[3] === 0xbe) {
+    return "a Java class file";
+  }
+  return null;
+}
+
+/** Length of the longest line, computed without splitting the whole string. */
+function longestLineLength(text: string): number {
+  let max = 0;
+  let current = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) {
+      if (current > max) max = current;
+      current = 0;
+    } else {
+      current++;
+    }
+  }
+  return current > max ? current : max;
+}
+
+/**
+ * Directives look like:
+ *
+ *   skillnotary-ignore-file R003 R004: reason
+ *   skillnotary-ignore-next-line R002
+ *   skillnotary-ignore-line R017
+ *   skillnotary-ignore R021            (bare form == whole file)
+ *
+ * They are parsed here but never applied here — see `config.applyConfig`.
+ */
+export function parseSuppressions(rel: string, content: string): SuppressionDirective[] {
+  const out: SuppressionDirective[] = [];
+  const re = /skillnotary-ignore(?:-(file|next-line|line))?[ \t]+((?:R\d{3}[,\s]*)+)(?::[ \t]*(.*))?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex++;
+      continue;
+    }
+    const scope = (m[1] ?? "file") as SuppressionDirective["scope"];
+    const rules = (m[2] ?? "").match(/R\d{3}/g) ?? [];
+    const reason = (m[3] ?? "").trim();
+    const line = content.slice(0, m.index).split("\n").length;
+    for (const rule of rules) out.push({ rule, file: rel, line, scope, reason });
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
 /**
  * Analyze a skill directory: extract declared and observed capabilities and
  * raise findings.
@@ -382,6 +478,7 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
   const scanTruncated: string[] = [];
   let scannedBytes = 0;
   const findings: Finding[] = [];
+  const suppressions: SuppressionDirective[] = [];
   const observed = new Set<CapabilityId>();
   let description: string | null = null;
   let frontmatterName: string | null = null;
@@ -392,6 +489,46 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
 
   for (const rel of files) {
     const abs = join(dir, rel);
+    const ext = extensionOf(rel);
+
+    // Inspect the head before deciding anything: binaries and executables are
+    // reported even though they are never text-scanned, because "compiled code
+    // you cannot read" is precisely what a reviewer needs to be told about.
+    let head: Buffer;
+    try {
+      head = readHead(abs, INSPECT_HEAD_BYTES);
+    } catch {
+      continue;
+    }
+    if (head.byteLength === 0) continue;
+
+    const magic = detectExecutableMagic(head);
+    if (magic !== null || EXECUTABLE_EXTENSIONS.has(ext)) {
+      findings.push({
+        rule: "R026",
+        severity: "high",
+        title: "Executable or compiled file in skill",
+        detail: `Contains ${magic ?? "an executable file type"} (${rel}). Compiled payloads cannot be reviewed by reading them, and a skill has no reason to ship one.`,
+        file: rel,
+        capability: "exec",
+      });
+      observed.add("exec");
+      continue;
+    }
+
+    if (looksBinary(head)) {
+      if (!SAFE_BINARY_EXTENSIONS.has(ext)) {
+        findings.push({
+          rule: "R026",
+          severity: "medium",
+          title: "Unrecognised binary file in skill",
+          detail: `Contains a binary file that is not a known document, image or archive type (${rel}). It was not scanned, so its contents are unreviewed.`,
+          file: rel,
+        });
+      }
+      continue;
+    }
+
     if (!isScannable(rel)) continue;
 
     if (scannedBytes >= LIMITS.maxScanBytesTotal) {
@@ -407,16 +544,32 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
     }
     if (fileSize > LIMITS.maxScanBytesPerFile) scanTruncated.push(rel);
 
-    let buf: Buffer;
-    try {
-      buf = readHead(abs, LIMITS.maxScanBytesPerFile);
-    } catch {
-      continue;
+    let buf = head;
+    if (fileSize > INSPECT_HEAD_BYTES) {
+      try {
+        buf = readHead(abs, LIMITS.maxScanBytesPerFile);
+      } catch {
+        continue;
+      }
     }
-    if (looksBinary(buf)) continue;
     scannedBytes += buf.byteLength;
 
     const content = buf.toString("utf8");
+
+    // A single enormous line is what minified or packed payloads look like.
+    const longest = longestLineLength(content);
+    if (longest >= OBFUSCATION_LINE_LENGTH) {
+      findings.push({
+        rule: "R027",
+        severity: "medium",
+        title: "Possible minified or obfuscated content",
+        detail: `${rel} has a line of ${longest} characters (threshold ${OBFUSCATION_LINE_LENGTH}). Packed or minified payloads hide their behaviour from review; ask for the source instead.`,
+        file: rel,
+      });
+    }
+
+    suppressions.push(...parseSuppressions(rel, content));
+
     const isSkillMd = /^skill\.md$/i.test(rel);
 
     if (isSkillMd) {
@@ -591,6 +744,21 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
 
   findings.sort(compareFindings);
 
+  // Attach the directive that covers each finding, if any. Nothing is dropped
+  // here: whether a directive is *honoured* is a policy decision that belongs
+  // to the user's config, not to the skill being reviewed.
+  for (const finding of findings) {
+    const directive = suppressions.find(
+      (candidate) =>
+        candidate.rule === finding.rule &&
+        candidate.file === finding.file &&
+        (candidate.scope === "file" ||
+          (candidate.scope === "line" && candidate.line === finding.line) ||
+          (candidate.scope === "next-line" && candidate.line + 1 === finding.line)),
+    );
+    if (directive !== undefined) finding.suppression = directive;
+  }
+
   const digest = options.skipDigest
     ? { integrity: "", files: files.length, bytes: 0, entries: {} }
     : digestTree(dir);
@@ -603,6 +771,7 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
     observed: sortCapabilities([...observed]),
     declared,
     findings,
+    suppressions,
     files: digest.files,
     bytes: digest.bytes,
     integrity: digest.integrity,

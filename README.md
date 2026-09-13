@@ -30,10 +30,10 @@ markdown-formatter (1 file, 587 B)
 
 *(Output above is trimmed — the full report lists 9 findings.)*
 
-> **Status: v0.1.0.** Early, but it runs, it is tested (73 tests), and it is
-> typechecked under `strict`. It has also been through an internal security
-> audit — [SECURITY-AUDIT.md](SECURITY-AUDIT.md) — whose findings are fixed and
-> each covered by a regression test. See
+> **Status: v0.2.0.** It runs, it is tested (103 tests), and it is typechecked
+> under `strict`. It has been through an internal security audit —
+> [SECURITY-AUDIT.md](SECURITY-AUDIT.md) — whose findings are fixed and each
+> covered by a regression test. See
 > [Threat model](#threat-model-what-this-does-not-do) for exactly what it does
 > and does not protect against.
 
@@ -64,8 +64,11 @@ it was the empty slot.
 |---|---|---|
 | **Lock** | `skillnotary lock` | `skills.lock` — every skill pinned to a content digest + resolved commit + its capabilities |
 | **Verify** | `skillnotary verify` | Detects bytes *and* capabilities drifting from what you approved |
-| **Attest** | `skillnotary keygen` / `sign` / `verify` | ed25519 signature over `skills.lock`; CI fails if the lock moved |
+| **Attest** | `skillnotary keygen` / `sign` / `verify` | ed25519 over a **DSSE envelope carrying an in-toto statement**; CI fails if the lock moved |
 | **Govern** | `skillnotary policy` | Allow/deny per skill and per capability; severity gates |
+| **Configure** | `skillnotary config` | Per-rule severities, ignore globs, apply targets — and the config digest is **locked**, so loosening it is drift |
+| **Repair** | `skillnotary fix` | Writes the `allowed-tools` a skill actually needs into its `SKILL.md` |
+| **Install** | `skillnotary apply` | Copies the locked skills into your harness directory, re-checking every digest first |
 | **Inventory** | `skillnotary sbom` | SBOM of every skill, its digest, license and capabilities |
 | **Audit** | `skillnotary audit` | Static capability + risk report with low false positives |
 | **Gate** | `skillnotary ci` | All of the above as one CI step |
@@ -83,11 +86,12 @@ npm i -D skillnotary            # or install it
 ## Quick start
 
 ```bash
-skillnotary init                                  # skills.json + default policy
-skillnotary add ./vendor/pdf-tools                # or github:acme/skills#pdf@v1.2.0
+skillnotary init                                  # skills.json + policy + config
+skillnotary add ./vendor/pdf-tools --fix          # add it, declaring what it does
 skillnotary lock                                  # pin what you just reviewed
 skillnotary audit                                 # see exactly what it can do
-skillnotary keygen && skillnotary sign            # attest the lockfile
+skillnotary keygen && skillnotary sign            # attest the lockfile (DSSE)
+skillnotary apply --dry-run                       # then install into your harness
 skillnotary ci                                    # the gate, for CI
 ```
 
@@ -184,7 +188,54 @@ otherwise deleting a line from `skills.lock` would be enough to pass the gate.
 
 Default when no policy file exists: `requireLock: true`, `maxSeverity: "high"`.
 
+## Configuration
+
+`skillnotary.config.json` tunes the detection layer:
+
+```json
+{
+  "version": 1,
+  "rules": { "R017": "off", "R021": "info", "R009": "critical" },
+  "ignore": ["vendor/*", "*.min.js"],
+  "ignoreSkills": ["legacy-*"],
+  "targets": { "claude-code": ".claude/skills" },
+  "defaultTarget": "claude-code",
+  "allowInlineSuppressions": false,
+  "requireSuppressionReason": false
+}
+```
+
+| Key | Effect |
+|---|---|
+| `rules` | Force a rule's severity, or `"off"` to silence it |
+| `ignore` | Drop findings for matching skill-relative paths (`*` crosses `/`) |
+| `ignoreSkills` | Skip a skill's findings entirely |
+| `targets` / `defaultTarget` | Where `apply` installs |
+| `allowInlineSuppressions` | Honour `skillnotary-ignore*` comments inside skills — **off by default** |
+| `requireSuppressionReason` | Refuse an inline suppression that carries no reason |
+
+**The config is locked.** Its digest is recorded in `skills.lock`, so loosening
+the suppression layer registers as drift and breaks `verify`/`ci` until it is
+reviewed and re-locked. Suppression is never silent either: every dropped finding
+is counted and attributed, and a refused directive is announced.
+
+Inline suppressions (`skillnotary-ignore-file R003: reason`,
+`skillnotary-ignore-next-line R002`, `skillnotary-ignore-line R017`) are opt-in
+for a reason: a skill is written by the party being reviewed, so one that could
+silence its own findings would be a bypass.
+
 ## CI
+
+As a composite action:
+
+```yaml
+- uses: skillnotary/skillnotary@v0.2.0
+  with:
+    command: ci
+    args: --min-severity medium
+```
+
+Or directly:
 
 ```yaml
 - uses: actions/setup-node@v5
@@ -199,16 +250,19 @@ failure. It needs no config: with a lockfile and a policy it is a complete gate.
 
 | Command | Purpose |
 |---|---|
-| `init` | Create `skills.json` and a default policy |
-| `add <source>` | Add a skill (`./path`, `github:owner/repo#sub/path@ref`, any git remote) |
+| `init` | Create `skills.json`, a default policy and a config |
+| `add <source>` | Add a skill (`./path`, `github:owner/repo#sub/path@ref`, any git remote); `--fix` also declares its tools |
 | `lock` | Resolve and write `skills.lock` (`--check` to fail instead of write) |
 | `verify` | Detect drift against the lock and validate the attestation |
 | `audit` | Static capability + risk report (`--json`) |
+| `fix` | Declare the capabilities a skill uses, back into its `SKILL.md` (`--dry-run`) |
 | `policy` | Evaluate the policy |
+| `apply` | Install the locked skills into a harness directory (`--target`, `--dry-run`, `--force`) |
 | `keygen` | Generate an ed25519 keypair (`0600` keyfile) |
-| `sign` | Attest `skills.lock` |
+| `sign` | Attest `skills.lock` with a DSSE envelope |
 | `sbom` | Emit an SBOM (`--out sbom.json`) |
 | `discover` | Find skills already installed across harnesses |
+| `config` | Show the effective configuration and its locked digest |
 | `ci` | verify + policy + audit, for pipelines |
 
 `discover` knows about `.claude/skills`, `.agents/skills`, `.opencode/skills`,
@@ -224,7 +278,9 @@ coercive/covert instruction · `R010` hidden or bidi Unicode · `R011` writes
 outside the project · `R001` undeclared capability · `R015` launches another
 agent · `R016` no `SKILL.md` · `R017` no license · `R021` no declared
 permissions · `R022` skips user confirmation · `R023` symlink in skill ·
-`R024` skill too large to review fully · `R025` scan truncated.
+`R024` skill too large to review fully · `R025` scan truncated · `R026`
+executable or unrecognised binary file · `R027` possible minified or obfuscated
+content.
 
 ### Two things we do to avoid crying wolf
 
@@ -261,8 +317,17 @@ Being explicit, because a security tool that overstates itself is worse than non
 - **Signatures cover `skills.lock`, not the skills themselves.** Signing attests
   "this lockfile, with these digests, was approved by this key". The digests are
   what tie that to the content.
-- **It is not Sigstore yet.** ed25519 over a JSON file; no transparency log, no
-  keyless/OIDC flow. `trustedKeys` is how you pin who may sign.
+- **Attestations are DSSE envelopes, but not Sigstore.** `sign` produces a
+  standard DSSE envelope carrying an in-toto statement, signed with ed25519 —
+  the same wrapper Sigstore signs. What is missing is the keyless/OIDC flow and
+  the transparency log, so `trustedKeys` is how you pin who may sign.
+- **The config is a suppression layer, and it is locked.** Rules can be turned
+  off, but the config's digest is recorded in `skills.lock`, so loosening it
+  shows up as drift and breaks `ci` until it is reviewed and re-locked.
+- **Inline suppressions are off by default.** A skill is written by the party
+  being reviewed; if it could silence its own findings, the tool would be
+  bypassable by the thing it is checking. Enable with
+  `allowInlineSuppressions`, and every honoured directive is reported.
 - **Digests are content-based, not platform-reproducible builds.** Two machines
   agree on the digest of the same file tree; this is not a reproducible-build
   guarantee.
@@ -286,18 +351,22 @@ Being explicit, because a security tool that overstates itself is worse than non
 
 ## Roadmap
 
-- Sigstore / keyless signing and a transparency log
+- Sigstore keyless signing (OIDC → Fulcio) and a Rekor transparency log
 - CycloneDX-conformant SBOM exporter
-- A rule plug-in API, so orgs can add their own signals
-- `--fix` for the mechanical findings (declare `allowed-tools` from observed)
-- Cross-harness install/apply (`skillnotary apply` from the lock)
+- A detection plug-in API, so orgs can add their own signals
+- `apply --prune` for skills removed from the lockfile
+- Deeper language coverage: AST-based analysis for Python and JavaScript
+
+See [CHANGELOG.md](CHANGELOG.md) for what has already shipped.
 
 ## Security
 
 A review tool has to survive the content it reviews, so the whole of v0.1.0 was
 audited: [SECURITY-AUDIT.md](SECURITY-AUDIT.md) documents **eight findings — all
 fixed, each with a regression test** in `test/security-fixes.test.ts`, plus the
-hypotheses that were tested and disproved.
+hypotheses that were tested and disproved. The v0.2 additions (`apply`, `fix`,
+and the config layer) extend the same set of guarantees and are covered by
+`test/v02.test.ts`.
 
 The guarantees the code is written to uphold:
 

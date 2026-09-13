@@ -43,11 +43,28 @@ import {
 } from "./attest.ts";
 import { discoverSkills, readSkillName } from "./discover.ts";
 import { CACHE_DIRNAME, resolveSpec } from "./source.ts";
-import { sanitizeForTerminal } from "./util.ts";
-import { VERSION } from "./version.ts";
+import { sanitizeForTerminal, sha256Hex } from "./util.ts";
+import { GENERATOR, VERSION } from "./version.ts";
 import * as R from "./report.ts";
-import type { Finding, Severity } from "./types.ts";
-import type { Attestation } from "./types.ts";
+import {
+  applyConfig,
+  CONFIG_FILENAME,
+  configDigest,
+  defaultConfig,
+  readConfig,
+  resolveTarget,
+  writeConfig,
+} from "./config.ts";
+import type { Config } from "./config.ts";
+import { applySkills } from "./apply.ts";
+import { planAllowedTools, toolsForCapabilities, writeFix } from "./fix.ts";
+import type {
+  CapabilityId,
+  Finding,
+  ManifestSkill,
+  Severity,
+  SkillAnalysis,
+} from "./types.ts";
 
 const HELP = `skillnotary ${VERSION} — lockfile, provenance and capability policy for AI agent skills
 
@@ -55,37 +72,45 @@ USAGE
   skillnotary <command> [options]
 
 COMMANDS
-  init                    Create skills.json and a default policy
+  init                    Create skills.json, a default policy and a config
   add <source>            Add a skill to the manifest (path, github:owner/repo#sub/path@ref)
   lock                    Resolve the manifest and write skills.lock
   verify                  Check the working tree against skills.lock (drift + attestation)
   audit                   Static capability and risk report
+  fix                     Declare the capabilities a skill actually uses (--dry-run)
   policy                  Evaluate the policy against the locked skills
+  apply                   Install the locked skills into a harness directory
   keygen                  Generate an ed25519 signing keypair
   sign                    Attest skills.lock with your key
   sbom                    Emit an SBOM for the locked skills
   discover                Find skills installed in known harness locations
+  config                  Show the effective configuration
   ci                      verify + policy + audit, for CI pipelines
   help                    Show this help
 
 OPTIONS
   --json                  Machine-readable output
   --out <path>            Write output to a file
-  --key <path>            Signing keyfile (default ${KEYFILE_FILENAME})
+  --key <path>            Signing keyfile (default $KEYFILE_FILENAME)
   --name <name>           Name to record for an added skill
   --refresh               Re-clone git sources instead of using the cache
   --check                 Do not write; fail if the lockfile would change
   --min-severity <s>      info|low|medium|high|critical (default: high)
   --skill <name>          Limit to a skill (repeatable)
+  --target <name|path>    Install target for "apply" (default: config.defaultTarget)
+  --dry-run               Show what would happen without writing anything
+  --fix                   With "add", also declare allowed-tools in SKILL.md
+  --force                 Apply even if content differs from the lockfile
   --[no-]color            Force or disable colour
   -h, --help              Show this help
   -v, --version           Print the version
 
 EXAMPLES
   skillnotary init
-  skillnotary add github:acme/skills#pdf-tools@v1.2.0
+  skillnotary add github:acme/skills#pdf-tools@v1.2.0 --fix
   skillnotary lock && skillnotary audit
   skillnotary keygen && skillnotary sign && skillnotary verify
+  skillnotary apply --target claude-code --dry-run
   skillnotary ci
 `;
 
@@ -99,6 +124,9 @@ const OPTIONS = {
   force: { type: "boolean" as const },
   "min-severity": { type: "string" as const },
   skill: { type: "string" as const, multiple: true },
+  target: { type: "string" as const },
+  "dry-run": { type: "boolean" as const },
+  fix: { type: "boolean" as const },
   color: { type: "boolean" as const },
   "no-color": { type: "boolean" as const },
   "include-bare": { type: "boolean" as const },
@@ -160,29 +188,279 @@ function policyPath(cwd: string): string {
   return join(cwd, POLICY_FILENAME);
 }
 
-function readFindingsBySkill(
-  analyses: Map<string, { findings: Finding[] }>,
-): Map<string, Finding[]> {
-  return new Map([...analyses].map(([name, a]) => [name, a.findings]));
+interface AttestationStatus {
+  present: boolean;
+  valid: boolean;
+  reason?: string;
+  keyId?: string;
+  format?: "legacy" | "dsse";
 }
 
-function checkAttestation(cwd: string): { present: boolean; valid: boolean; reason?: string; attestation: Attestation | null } {
+function checkAttestation(cwd: string): AttestationStatus {
   const att = readAttestation(attestationPath(cwd));
   const lock = lockfilePath(cwd);
-  if (!att) return { present: false, valid: false, attestation: null };
+  if (!att) return { present: false, valid: false };
   if (!existsSync(lock)) {
-    return { present: true, valid: false, reason: "skills.lock is missing", attestation: att };
+    return { present: true, valid: false, reason: "skills.lock is missing" };
   }
   const result = verifyPayload(att, readFileSync(lock));
   return {
     present: true,
     valid: result.valid,
     ...(result.reason !== undefined ? { reason: result.reason } : {}),
-    attestation: att,
+    ...(result.keyId !== undefined ? { keyId: result.keyId } : {}),
+    ...(result.format !== undefined ? { format: result.format } : {}),
   };
 }
 
+function loadConfig(cwd: string): Config {
+  return readConfig(cwd) ?? defaultConfig();
+}
+
+interface Prepared {
+  name: string;
+  dir: string;
+  analysis: SkillAnalysis;
+  /** Findings after the config layer has been applied. */
+  effective: Finding[];
+  suppressed: Array<{ finding: Finding; by: string }>;
+  /** Things the config layer wanted to say but could not act on. */
+  warnings: string[];
+  ignoredSkill: boolean;
+}
+
+/** Resolve, analyse, then apply the config layer. */
+function prepareSkill(
+  cwd: string,
+  entry: ManifestSkill,
+  config: Config,
+  refresh: boolean,
+): Prepared {
+  const resolved = resolveSpec(entry.source, {
+    cwd,
+    cacheDir: join(cwd, CACHE_DIRNAME),
+    refresh,
+  });
+  const analysis = analyzeSkill(resolved.dir, { fallbackName: entry.name });
+  const application = applyConfig(analysis.findings, entry.name, config);
+  return {
+    name: entry.name,
+    dir: resolved.dir,
+    analysis,
+    effective: application.findings,
+    suppressed: application.suppressed,
+    warnings: application.warnings,
+    ignoredSkill: application.ignoredSkill,
+  };
+}
+
+/**
+ * Report what the config layer did. Suppression is never silent: if a finding
+ * was dropped, the user is told how many and by what — and if a directive was
+ * refused, that is said out loud too.
+ */
+function reportSuppressed(prepared: Prepared, color: boolean): void {
+  for (const warning of prepared.warnings) {
+    console.log(R.bad(`  ! ${sanitizeForTerminal(warning)}`, color));
+  }
+  if (prepared.ignoredSkill) {
+    console.log(R.dim(`  · ${prepared.name}: ignored by config.ignoreSkills`, color));
+    return;
+  }
+  if (prepared.suppressed.length === 0) return;
+  const by = [...new Set(prepared.suppressed.map((s) => s.by))];
+  console.log(
+    R.dim(`  · ${prepared.suppressed.length} finding(s) suppressed (${by.join("; ")})`, color),
+  );
+}
+
 // -------------------------------------------------------------------- commands
+
+function cmdConfig(ctx: Context): number {
+  const { cwd, color, values } = ctx;
+  const config = loadConfig(cwd);
+  const digest = configDigest(cwd);
+
+  if (bool(values, "json")) {
+    console.log(JSON.stringify({ config, digest }, null, 2));
+    return 0;
+  }
+
+  console.log(
+    R.bold(CONFIG_FILENAME, color) +
+      R.dim(digest === null ? "  (absent — using defaults)" : `  ${digest.slice(0, 22)}`, color),
+  );
+  console.log(`  locked digest  ${digest ?? "none"}`);
+
+  const entries = Object.entries(config.rules ?? {});
+  console.log("");
+  console.log(R.bold("rule overrides", color));
+  if (entries.length === 0) console.log(R.dim("  (none)", color));
+  for (const [rule, setting] of entries) console.log(`  ${rule.padEnd(6)} -> ${setting}`);
+
+  console.log("");
+  console.log(R.bold("ignore (file globs)", color));
+  console.log(config.ignore && config.ignore.length > 0 ? `  ${config.ignore.join(", ")}` : R.dim("  (none)", color));
+  console.log(R.bold("ignoreSkills", color));
+  console.log(
+    config.ignoreSkills && config.ignoreSkills.length > 0
+      ? `  ${config.ignoreSkills.join(", ")}`
+      : R.dim("  (none)", color),
+  );
+
+  console.log("");
+  console.log(R.bold("inline suppressions", color));
+  console.log(
+    config.allowInlineSuppressions
+      ? `  ${R.bad("honoured", color)} ${R.dim("— skills can silence their own findings", color)}`
+      : `  ${R.ok("ignored", color)} ${R.dim("(default; skills cannot silence themselves)", color)}`,
+  );
+
+  console.log("");
+  console.log(R.bold("apply targets", color));
+  for (const [name, dir] of Object.entries(config.targets ?? {})) {
+    const marker = name === config.defaultTarget ? R.dim("  (default)", color) : "";
+    console.log(`  ${name.padEnd(18)} ${dir}${marker}`);
+  }
+  return 0;
+}
+
+function cmdApply(ctx: Context): number {
+  const { cwd, color, values } = ctx;
+  const config = loadConfig(cwd);
+  const lockfile = readLockfile(lockfilePath(cwd));
+  if (!lockfile) {
+    console.error(`error: no ${LOCKFILE_FILENAME}; run \`skillnotary lock\` first`);
+    return 2;
+  }
+
+  let target: { name: string; dir: string };
+  try {
+    target = resolveTarget(config, str(values, "target"));
+  } catch (error) {
+    console.error(`error: ${(error as Error).message}`);
+    return 2;
+  }
+
+  // Installing content that no longer matches the lockfile defeats the point,
+  // so treat drift as fatal unless --force is given.
+  const manifest = readManifest(manifestPath(cwd)) ?? emptyManifest();
+  const { lockfile: fresh } = buildLockfile({ cwd, manifest, refresh: bool(values, "refresh") });
+  const drifts = diffLockfiles(lockfile, fresh);
+  if (drifts.length > 0 && !bool(values, "force")) {
+    console.log(R.bad(`✗ ${LOCKFILE_FILENAME} is out of date — run \`skillnotary lock\` first (or pass --force)`, color));
+    console.log(R.formatDrifts(drifts, color));
+    return 1;
+  }
+
+  const dryRun = bool(values, "dry-run");
+  const result = applySkills({
+    cwd,
+    lockfile,
+    targetDir: target.dir,
+    dryRun,
+    only: strList(values, "skill"),
+    force: bool(values, "force"),
+  });
+
+  console.log(
+    R.bold(dryRun ? "apply (dry run)" : "apply", color) + R.dim(`  target=${target.name} -> ${result.targetDir}`, color),
+  );
+  for (const warning of result.warnings) {
+    console.log(R.dim(`  ! ${sanitizeForTerminal(warning)}`, color));
+  }
+  for (const item of result.applied) {
+    const label =
+      item.action === "unchanged" ? R.dim("unchanged", color) : R.ok(item.action.padEnd(9), color);
+    console.log(
+      `  ${label} ${R.bold(sanitizeForTerminal(item.name), color)} ${R.dim(`(${item.files} files, ${item.bytes} B)`, color)}`,
+    );
+  }
+  for (const item of result.skipped) {
+    console.log(
+      `  ${R.bad("skipped  ", color)} ${R.bold(sanitizeForTerminal(item.name), color)} ${R.dim(sanitizeForTerminal(item.reason), color)}`,
+    );
+  }
+  if (result.applied.length === 0 && result.skipped.length === 0) {
+    console.log(R.dim("  no skills selected", color));
+  }
+
+  return result.skipped.length > 0 ? 1 : 0;
+}
+
+function cmdFix(ctx: Context): number {
+  const { cwd, color, values } = ctx;
+  const config = loadConfig(cwd);
+  const manifest = readManifest(manifestPath(cwd));
+  if (!manifest) {
+    console.error(`error: no ${MANIFEST_FILENAME}; run \`skillnotary init\` first`);
+    return 2;
+  }
+
+  const selected = strList(values, "skill");
+  const entries =
+    selected.length > 0 ? manifest.skills.filter((s) => selected.includes(s.name)) : manifest.skills;
+  if (entries.length === 0) {
+    console.error("error: no matching skills in the manifest");
+    return 2;
+  }
+
+  const dryRun = bool(values, "dry-run");
+  let changed = 0;
+
+  for (const entry of entries) {
+    let prepared: Prepared;
+    try {
+      prepared = prepareSkill(cwd, entry, config, bool(values, "refresh"));
+    } catch (error) {
+      console.error(`error: could not resolve ${entry.source}: ${(error as Error).message}`);
+      return 2;
+    }
+
+    const plan = planAllowedTools(prepared.dir, prepared.analysis);
+    console.log(R.bold(sanitizeForTerminal(entry.name), color));
+
+    if (!plan.changed) {
+      console.log(R.dim(`  · ${plan.reason ?? "nothing to do"}`, color));
+      continue;
+    }
+
+    console.log(`  capabilities  ${plan.tools.join(", ")}`);
+    if (plan.keptTools.length > 0) console.log(R.dim(`  = kept        ${plan.keptTools.join(", ")}`, color));
+    if (plan.addedTools.length > 0) console.log(R.ok(`  + added       ${plan.addedTools.join(", ")}`, color));
+    for (const line of plan.removed) console.log(R.bad(`  - ${sanitizeForTerminal(line)}`, color));
+    for (const line of plan.added) console.log(R.ok(`  + ${sanitizeForTerminal(line)}`, color));
+
+    if (!dryRun && writeFixSafe(plan)) {
+      console.log(R.dim(`  wrote ${plan.file}`, color));
+    }
+    changed++;
+  }
+
+  console.log("");
+  if (changed === 0) {
+    console.log(R.ok("✓ nothing to fix", color));
+    return 0;
+  }
+  console.log(
+    dryRun
+      ? R.dim(`${changed} skill(s) would change; re-run without --dry-run to write`, color)
+      : R.ok(`${changed} skill(s) updated — run \`skillnotary lock\` to record the new declarations`, color),
+  );
+  return 0;
+}
+
+/** Write a fix, refusing to touch anything that is not a skill's SKILL.md. */
+function writeFixSafe(plan: { changed: boolean; file: string; newContent: string }): boolean {
+  if (!plan.changed) return false;
+  if (!/[/\\]SKILL\.md$/i.test(plan.file)) {
+    console.error(`error: refusing to write outside a SKILL.md: ${plan.file}`);
+    return false;
+  }
+  writeFix(plan as Parameters<typeof writeFix>[0]);
+  return true;
+}
+
 
 function cmdInit(ctx: Context): number {
   const { cwd, color } = ctx;
@@ -203,11 +481,20 @@ function cmdInit(ctx: Context): number {
     console.log(`${R.dim("exists ", color)} ${POLICY_FILENAME}`);
   }
 
+  const cPath = join(cwd, CONFIG_FILENAME);
+  if (!existsSync(cPath)) {
+    writeConfig(cwd, defaultConfig());
+    console.log(`${R.ok("created", color)} ${CONFIG_FILENAME}`);
+  } else {
+    console.log(`${R.dim("exists ", color)} ${CONFIG_FILENAME}`);
+  }
+
   console.log("");
   console.log("Next:");
   console.log(`  1. skillnotary add ./path/to/skill        # or github:owner/repo#sub/path@ref`);
   console.log("  2. skillnotary lock                       # pin what you reviewed");
   console.log("  3. skillnotary audit                      # see what it can do");
+  console.log("  4. skillnotary apply --dry-run            # install into your harness");
   return 0;
 }
 
@@ -234,6 +521,8 @@ function cmdAdd(ctx: Context): number {
     fallbackName: basename(resolved.dir),
   });
   const name = str(ctx.values, "name") ?? readSkillName(resolved.dir) ?? analysis.name;
+  const config = loadConfig(cwd);
+  const application = applyConfig(analysis.findings, name, config);
 
   writeManifest(mPath, upsertSkill(manifest, { name, source }));
 
@@ -241,10 +530,23 @@ function cmdAdd(ctx: Context): number {
     `${R.ok("added", color)} ${R.bold(sanitizeForTerminal(name), color)} ${R.dim(`from ${sanitizeForTerminal(source)}`, color)}`,
   );
   console.log(R.formatAnalysisSummary(analysis, { color }, name));
-  const counts = countBySeverity(analysis.findings);
+
+  if (application.suppressed.length > 0) {
+    console.log(
+      R.dim(
+        `  · ${application.suppressed.length} finding(s) suppressed by config (${application.suppressed.map((s) => s.by).join("; ")})`,
+        color,
+      ),
+    );
+  }
+  for (const warning of application.warnings) {
+    console.log(R.bad(`  ! ${sanitizeForTerminal(warning)}`, color));
+  }
+
+  const counts = countBySeverity(application.findings);
   if (counts.critical + counts.high > 0) {
     console.log("");
-    console.log(R.formatFindings(analysis.findings, name, { color }));
+    console.log(R.formatFindings(application.findings, name, { color }));
     console.log("");
     console.log(
       R.bad(
@@ -253,6 +555,19 @@ function cmdAdd(ctx: Context): number {
       ),
     );
   }
+
+  if (bool(ctx.values, "fix")) {
+    const plan = planAllowedTools(resolved.dir, analysis);
+    console.log("");
+    if (!plan.changed) {
+      console.log(R.dim(`· ${plan.reason ?? "nothing to fix"}`, color));
+    } else if (writeFixSafe(plan)) {
+      console.log(
+        `${R.ok("fixed", color)} declared ${R.bold(plan.tools.join(", "), color)} ${R.dim(`in ${plan.file}`, color)}`,
+      );
+    }
+  }
+
   return 0;
 }
 
@@ -344,7 +659,7 @@ function cmdVerify(ctx: Context): number {
     if (att.valid) {
       console.log(
         R.ok(`✓ ${LOCKFILE_FILENAME} attestation is valid`, color) +
-          R.dim(` (${att.attestation?.keyId ?? "unknown key"})`, color),
+          R.dim(` (${att.keyId ?? "unknown key"}${att.format === "dsse" ? ", DSSE" : ""})`, color),
       );
     } else {
       failed = true;
@@ -376,43 +691,48 @@ function cmdAudit(ctx: Context): number {
     return 2;
   }
 
+  const config = loadConfig(cwd);
   let worst: Severity | null = null;
   const results: unknown[] = [];
 
   for (const entry of entries) {
-    let resolved;
+    let prepared: Prepared;
     try {
-      resolved = resolveSpec(entry.source, { cwd, cacheDir: join(cwd, CACHE_DIRNAME) });
+      prepared = prepareSkill(cwd, entry, config, bool(values, "refresh"));
     } catch (error) {
       console.error(`error: could not resolve ${entry.source}: ${String(error)}`);
       return 2;
     }
-    const analysis = analyzeSkill(resolved.dir, { fallbackName: entry.name });
-    const skillWorst = worstSeverity(analysis.findings);
+    const { analysis, effective } = prepared;
+
+    const skillWorst = worstSeverity(effective);
     if (skillWorst && atLeast(skillWorst, threshold)) {
       if (worst === null || atLeast(skillWorst, worst)) worst = skillWorst;
     }
     results.push({
       name: entry.name,
       source: entry.source,
-      dir: resolved.dir,
+      dir: prepared.dir,
       integrity: analysis.integrity,
       license: analysis.license,
       declared: analysis.declared.capabilities,
       declaredTools: analysis.declared.tools,
       observed: analysis.observed,
-      counts: countBySeverity(analysis.findings),
-      findings: analysis.findings,
+      counts: countBySeverity(effective),
+      findings: effective,
+      suppressedCount: prepared.suppressed.length,
+      ignoredByConfig: prepared.ignoredSkill,
     });
 
     if (!bool(values, "json")) {
       console.log(R.formatAnalysisSummary(analysis, { color }, entry.name));
-      const body = R.formatFindings(analysis.findings, entry.name, { color, showInfo: false });
+      const body = R.formatFindings(effective, entry.name, { color, showInfo: false });
       if (body !== "") {
         console.log(body);
       } else {
         console.log(R.dim("  no findings at low or above", color));
       }
+      reportSuppressed(prepared, color);
       console.log("");
     }
   }
@@ -433,6 +753,7 @@ function cmdAudit(ctx: Context): number {
 
 function cmdPolicy(ctx: Context): number {
   const { cwd, color, values } = ctx;
+  const config = loadConfig(cwd);
   const policy = readPolicy(policyPath(cwd)) ?? defaultPolicy();
   const committed = readLockfile(lockfilePath(cwd));
   const manifest = readManifest(manifestPath(cwd)) ?? emptyManifest();
@@ -443,22 +764,33 @@ function cmdPolicy(ctx: Context): number {
     refresh: bool(values, "refresh"),
   });
 
+  // The config layer is applied to findings before policy sees them, so turning
+  // a rule off in config also stops it producing P009 violations. That is the
+  // user's call — and because the config digest is locked, changing it is drift.
+  const findingsBySkill = new Map<string, Finding[]>();
+  const freshCaps = new Map<string, { capabilities: CapabilityId[]; declared: CapabilityId[] }>();
+  for (const [name, analysis] of analyses) {
+    const application = applyConfig(analysis.findings, name, config);
+    findingsBySkill.set(name, application.findings);
+    for (const warning of application.warnings) {
+      console.log(R.bad(`! ${sanitizeForTerminal(warning)}`, color));
+    }
+    freshCaps.set(name, {
+      capabilities: analysis.observed,
+      declared: analysis.declared.capabilities,
+    });
+  }
+
   // Policy is evaluated against what is on disk right now. `skills.lock` is
   // attacker-writable, so its capability claims only count while they still
   // agree with a fresh analysis; otherwise P010 fires.
-  const freshCaps = new Map(
-    [...analyses].map(([name, analysis]) => [
-      name,
-      { capabilities: analysis.observed, declared: analysis.declared.capabilities },
-    ]),
-  );
   const lockDrift = committed ? diffLockfiles(committed, fresh) : [];
 
   const att = checkAttestation(cwd);
   const outcome = evaluatePolicy({
     policy,
     lockfile: committed ?? fresh,
-    findingsBySkill: readFindingsBySkill(analyses),
+    findingsBySkill,
     attestation: { present: att.present, valid: att.valid, ...(att.reason ? { reason: att.reason } : {}) },
     fresh: freshCaps,
     lockDrift,
@@ -505,13 +837,35 @@ function cmdSign(ctx: Context): number {
   }
 
   const keys = readKeyFile(keyPath);
-  const attestation = signPayload(readFileSync(lock), keys, LOCKFILE_FILENAME);
+  const lockBytes = readFileSync(lock);
+  const parsedLock = readLockfile(lock);
+
+  // The predicate records what was actually reviewed: the config digest that
+  // shaped the findings, and every skill's digest and capabilities.
+  const attestation = signPayload(lockBytes, keys, LOCKFILE_FILENAME, {
+    generator: GENERATOR,
+    configDigest: parsedLock?.config?.digest ?? null,
+    skills: (parsedLock?.skills ?? []).map((skill) => ({
+      name: skill.name,
+      integrity: skill.integrity,
+      capabilities: skill.capabilities,
+    })),
+  });
+
   const out = str(values, "out") ?? attestationPath(cwd);
   writeFileSync(out, `${JSON.stringify(attestation, null, 2)}\n`, "utf8");
 
+  const signature = attestation.signatures[0];
   console.log(`${R.ok("signed", color)} ${LOCKFILE_FILENAME} -> ${out}`);
-  console.log(`  keyId   ${attestation.keyId}`);
-  console.log(`  digest  ${attestation.subject.digest.slice(0, 28)}...`);
+  console.log(`  format   DSSE (${attestation.payloadType})`);
+  console.log(`  keyId    ${signature?.keyid ?? "?"}`);
+  console.log(`  subject  sha256:${sha256Hex(lockBytes).slice(0, 24)}...`);
+  console.log(
+    R.dim(
+      `  predicate covers ${parsedLock?.skills.length ?? 0} skill(s) and the config digest`,
+      color,
+    ),
+  );
   return 0;
 }
 
@@ -588,6 +942,7 @@ function cmdCi(ctx: Context): number {
 
   console.log(R.bold("[3/3] risk audit", color));
   const threshold = asSeverity(str(values, "min-severity"), "high");
+  const config = loadConfig(cwd);
   const manifest = readManifest(manifestPath(cwd)) ?? emptyManifest();
   let auditCode = 0;
   if (manifest.skills.length === 0) {
@@ -596,10 +951,17 @@ function cmdCi(ctx: Context): number {
     const { analyses } = buildLockfile({ cwd, manifest, refresh: bool(values, "refresh") });
     let worst: Severity | null = null;
     for (const [name, analysis] of analyses) {
-      const found = analysis.findings.filter((f) => f.severity !== "info");
+      const application = applyConfig(analysis.findings, name, config);
+      for (const warning of application.warnings) {
+        console.log(R.bad(`  ! ${sanitizeForTerminal(warning)}`, color));
+      }
+      if (application.suppressed.length > 0) {
+        console.log(R.dim(`  · ${name}: ${application.suppressed.length} finding(s) suppressed by config`, color));
+      }
+      const found = application.findings.filter((f) => f.severity !== "info");
       if (found.length === 0) continue;
-      console.log(R.formatFindings(found, name, { color }));
-      const w = worstSeverity(analysis.findings);
+      console.log(R.formatFindings(application.findings, name, { color }));
+      const w = worstSeverity(application.findings);
       if (w && atLeast(w, threshold) && (worst === null || atLeast(w, worst))) worst = w;
     }
     if (worst !== null) {
@@ -653,8 +1015,14 @@ function main(): number {
       return cmdVerify(ctx);
     case "audit":
       return cmdAudit(ctx);
+    case "fix":
+      return cmdFix(ctx);
     case "policy":
       return cmdPolicy(ctx);
+    case "apply":
+      return cmdApply(ctx);
+    case "config":
+      return cmdConfig(ctx);
     case "keygen":
       return cmdKeygen(ctx);
     case "sign":

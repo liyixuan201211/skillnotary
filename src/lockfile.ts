@@ -6,6 +6,7 @@ import { canonicalJson, readTextFileSafe, writeTextFile } from "./util.ts";
 import { join } from "node:path";
 import type { Lockfile, LockedSkill, Manifest, SkillAnalysis, CapabilityId } from "./types.ts";
 import { ALL_CAPABILITIES } from "./types.ts";
+import { configDigest } from "./config.ts";
 
 export const LOCKFILE_FILENAME = "skills.lock";
 
@@ -114,9 +115,17 @@ export function normalizeLockfile(parsed: unknown): Lockfile {
     };
   });
 
+  const rawConfig = record["config"];
+  let config: { digest: string | null } | undefined;
+  if (typeof rawConfig === "object" && rawConfig !== null) {
+    const c = rawConfig as Record<string, unknown>;
+    config = { digest: typeof c["digest"] === "string" ? c["digest"] : null };
+  }
+
   return {
     lockfileVersion: 1,
     generator: typeof record["generator"] === "string" ? record["generator"] : "unknown",
+    ...(config !== undefined ? { config } : {}),
     skills,
   };
 }
@@ -183,7 +192,12 @@ export function buildLockfile(options: BuildOptions): BuildResult {
 
   skills.sort((a, b) => a.name.localeCompare(b.name));
   return {
-    lockfile: { lockfileVersion: 1, generator: GENERATOR, skills },
+    lockfile: {
+      lockfileVersion: 1,
+      generator: GENERATOR,
+      config: { digest: configDigest(options.cwd) },
+      skills,
+    },
     analyses,
     warnings,
   };
@@ -195,7 +209,8 @@ export type DriftKind =
   | "source-changed"
   | "integrity-changed"
   | "capabilities-changed"
-  | "resolved-changed";
+  | "resolved-changed"
+  | "config-changed";
 
 export interface Drift {
   name: string;
@@ -211,6 +226,19 @@ export interface Drift {
  */
 export function diffLockfiles(committed: Lockfile, fresh: Lockfile): Drift[] {
   const drifts: Drift[] = [];
+
+  // A changed config means the suppression layer moved, which is exactly the
+  // kind of change an attacker would smuggle in alongside a malicious skill.
+  const beforeConfig = committed.config?.digest ?? null;
+  const afterConfig = fresh.config?.digest ?? null;
+  if (beforeConfig !== afterConfig) {
+    drifts.push({
+      name: "(config)",
+      kind: "config-changed",
+      detail: `skillnotary.config.json changed since it was locked (${shortHash(beforeConfig)} -> ${shortHash(afterConfig)}); review the suppression layer`,
+    });
+  }
+
   const locked = new Map(committed.skills.map((s) => [s.name, s]));
   const current = new Map(fresh.skills.map((s) => [s.name, s]));
 
@@ -263,6 +291,10 @@ export function diffLockfiles(committed: Lockfile, fresh: Lockfile): Drift[] {
 
 function short(integrity: string): string {
   return integrity.replace(/^sha256-/, "").slice(0, 12);
+}
+
+function shortHash(digest: string | null): string {
+  return digest === null ? "none" : digest.slice(0, 15);
 }
 
 export function lockfilePath(cwd: string): string {

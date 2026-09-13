@@ -1,6 +1,6 @@
 {
   "name": "skillnotary",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lockfile, provenance and capability policy for AI agent skills. Pin what your agent can do — and prove it.",
   "type": "module",
   "bin": {
