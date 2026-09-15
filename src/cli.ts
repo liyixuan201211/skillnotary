@@ -1003,7 +1003,11 @@ function main(): number {
 
   if (!command || command === "help" || bool(values, "help")) {
     console.log(HELP);
-    return command ? 0 : 2;
+    // An explicit help request is a success; being invoked with no command at
+    // all is a usage error. `--help` used to take the error path, because a
+    // flag leaves no positional command, so the documented smoke test
+    // `skillnotary --help` exited 2 and looked like a failure.
+    return command !== undefined || bool(values, "help") ? 0 : 2;
   }
 
   const rest = positionals.slice(1);

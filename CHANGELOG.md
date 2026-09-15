@@ -24,6 +24,10 @@ All notable changes are recorded here. This project follows
 
 ### Fixed
 
+- `--help` and `-h` exited `2`, while `help` exited `0`: a flag leaves no
+  positional command, so the explicit-help case fell into the no-command branch
+  and the documented `skillnotary --help` smoke test looked like a failure.
+  Invoking with no command at all is still a usage error (`2`).
 - The critical `R004` (secrets + network) rule had become unreachable from
   prose. With `R003` code-scoped, `R031` was the only prose observer of
   `secrets`, and three of its subject alternatives could never match because a
