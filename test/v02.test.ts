@@ -12,6 +12,7 @@ import {
   applyConfig,
   configDigest,
   defaultConfig,
+  ignoreMatches,
   readConfig,
   resolveTarget,
   writeConfig,
@@ -57,6 +58,35 @@ test("config: ignore globs drop findings by file", () => {
   );
   assert.deepEqual(result.findings.map((f) => f.file), ["SKILL.md"]);
   assert.equal(result.suppressed.length, 2);
+});
+
+test("config: an ignore entry can be scoped to one rule and one path", () => {
+  // Documentation legitimately contains detector strings, so the exemption has
+  // to be narrow: this rule, these files.
+  const config = { ...defaultConfig(), ignore: ["R003:reference/*"] };
+  const result = applyConfig(
+    [
+      finding("R003", "reference/capabilities.md"),
+      finding("R003", "SKILL.md"),
+      finding("R009", "reference/capabilities.md"),
+    ],
+    "s",
+    config,
+  );
+  assert.deepEqual(result.findings.map((f) => `${f.rule}:${f.file}`), [
+    "R003:SKILL.md",
+    "R009:reference/capabilities.md",
+  ]);
+  assert.equal(result.suppressed.length, 1);
+  assert.match(result.suppressed[0]?.by ?? "", /R003:reference/);
+});
+
+test("config: a rule-scoped ignore does not leak to other rules or paths", () => {
+  assert.equal(ignoreMatches("R003:reference/*", "R003", "reference/x.md"), true);
+  assert.equal(ignoreMatches("R003:reference/*", "R004", "reference/x.md"), false);
+  assert.equal(ignoreMatches("R003:reference/*", "R003", "SKILL.md"), false);
+  assert.equal(ignoreMatches("vendor/*", "R003", "vendor/x.js"), true);
+  assert.equal(ignoreMatches("R003", "R003", "SKILL.md"), false, "a bare id is a path glob");
 });
 
 test("config: ignoreSkills drops the whole skill", () => {

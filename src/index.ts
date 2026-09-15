@@ -42,6 +42,7 @@ export {
   configDigest,
   defaultConfig,
   effectiveRules,
+  ignoreMatches,
   readConfig,
   resolveTarget,
   writeConfig,

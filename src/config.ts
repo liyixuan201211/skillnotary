@@ -12,7 +12,19 @@ export interface Config {
   version: 1;
   /** Per-rule severity override, or "off" to silence the rule. */
   rules?: Record<string, RuleSetting>;
-  /** Skill-relative glob patterns whose findings are dropped. `*` crosses `/`. */
+  /**
+   * Findings to drop. Two forms:
+   *
+   *   "vendor/*"            any finding whose path matches
+   *   "R003:reference/*"    only rule R003, only on matching paths
+   *
+   * The rule-scoped form exists because a security skill's own documentation
+   * necessarily contains the strings its rules look for — the capability table
+   * in a reference doc lists `~/.ssh` without touching it. Scoping the exception
+   * to a rule and a path keeps the exemption honest instead of blinding the
+   * whole file.
+   * `*` crosses `/`.
+   */
   ignore?: string[];
   /** Skill names to skip entirely (still locked and verified). */
   ignoreSkills?: string[];
@@ -134,8 +146,11 @@ export function applyConfig(
       suppressed.push({ finding, by: `config.rules.${finding.rule}=off` });
       continue;
     }
-    if (matchesAny(config.ignore, finding.file)) {
-      suppressed.push({ finding, by: `config.ignore matched ${finding.file}` });
+    const ignoreHit = (config.ignore ?? []).find((entry) =>
+      ignoreMatches(entry, finding.rule, finding.file),
+    );
+    if (ignoreHit !== undefined) {
+      suppressed.push({ finding, by: `config.ignore matched ${ignoreHit}` });
       continue;
     }
     if (finding.suppression !== undefined) {
@@ -167,7 +182,23 @@ export function applyConfig(
   return { findings: kept, suppressed, ignoredSkill: false, warnings };
 }
 
-/** Severity overrides may *raise* a finding; this reports the effective set. */
+/**
+ * Match one ignore entry against a finding.
+ *
+ *   "vendor/*"          -> path glob only
+ *   "R003:reference/*"  -> rule AND path
+ */
+export function ignoreMatches(entry: string, rule: string, file: string): boolean {
+  const colon = entry.indexOf(":");
+  if (colon > 0 && /^R\d{3}$/i.test(entry.slice(0, colon))) {
+    return (
+      entry.slice(0, colon).toUpperCase() === rule.toUpperCase() &&
+      globMatch(entry.slice(colon + 1), file)
+    );
+  }
+  return globMatch(entry, file);
+}
+
 export function effectiveRules(config: Config): Array<{ rule: string; setting: RuleSetting }> {
   return Object.entries(config.rules ?? {}).map(([rule, setting]) => ({ rule, setting }));
 }

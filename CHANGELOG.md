@@ -3,6 +3,39 @@
 All notable changes are recorded here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Rule R031** — a prose *instruction* to read or move credential material.
+  `R003` is now code-scoped, because a security skill's own capability table
+  necessarily quotes `~/.ssh` and `.env` without touching them; `R031` catches
+  the instruction instead, and it is direction-aware, so "do not read the .env
+  file" is not an access.
+- **Rules R029 / R030** — shell file writes and shell file reads, as
+  code-scoped capability signals. A leading `>` in prose is a blockquote and
+  `cat` in prose is an animal, so neither implies `fs.write` / `fs.read` any
+  more.
+- **Rule-scoped ignore entries** — `"R003:reference/*"` drops one rule on one
+  path, so a documentation exemption can be narrow instead of blinding a whole
+  file.
+- **`R001` names the file that exercises the capability**, so a rule-scoped
+  ignore on a documentation directory can exempt the capability it documents.
+
+### Fixed
+
+- The critical `R004` (secrets + network) rule had become unreachable from
+  prose. With `R003` code-scoped, `R031` was the only prose observer of
+  `secrets`, and three of its subject alternatives could never match because a
+  leading `\b` cannot hold before `~` or `.`. Its verb list also missed the
+  ordinary verbs an instruction uses (`check`, `load`, `echo`, `print`,
+  `fetch`, `retrieve`, …), while a fuzzy `\w*` flagged unrelated words such as
+  "category" and "copyright".
+- A vetoed match no longer grants its capability: "do not read the .env file"
+  is not secret access, so it cannot come back as `R001` / `R004`.
+- `head -n` / `tail -n` were not recognised as shell reads; only the uncommon
+  `head -20` spelling was.
+
 ## [0.2.0] — 2026-09-13
 
 The "make it a tool, not just a report" release: skills can now be **installed**,

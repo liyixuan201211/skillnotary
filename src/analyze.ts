@@ -498,6 +498,19 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
   const findings: Finding[] = [];
   const suppressions: SuppressionDirective[] = [];
   const observed = new Set<CapabilityId>();
+  // Where each capability was seen. A capability is only as reviewable as the
+  // file that exercises it, so R001 has to name that file rather than falling
+  // back to SKILL.md: otherwise a rule-scoped ignore on a documentation
+  // directory could never exempt the capability it documents, and — worse — a
+  // capability genuinely used in SKILL.md could be hidden by suppressing an
+  // unrelated note about it elsewhere.
+  const capabilitySources = new Map<CapabilityId, Set<string>>();
+  const noteCapability = (cap: CapabilityId, rel: string): void => {
+    observed.add(cap);
+    const sources = capabilitySources.get(cap);
+    if (sources) sources.add(rel);
+    else capabilitySources.set(cap, new Set([rel]));
+  };
   let description: string | null = null;
   let frontmatterName: string | null = null;
   let declared: DeclaredPermissions = { tools: [], capabilities: [] };
@@ -530,7 +543,7 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
         file: rel,
         capability: "exec",
       });
-      observed.add("exec");
+      noteCapability("exec", rel);
       continue;
     }
 
@@ -611,7 +624,7 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
       // A ```bash block is runnable shell. That is shell execution even when
       // the snippet itself contains nothing the rules recognise.
       if (segment.kind === "code" && segment.lang !== undefined && SHELL_LANGUAGES.has(segment.lang)) {
-        observed.add("exec");
+        noteCapability("exec", rel);
       }
 
       for (const rule of RULES) {
@@ -619,8 +632,11 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
         const hits = findMatches(rule.pattern, segment.text);
         if (hits.length === 0) continue;
 
-        if (rule.capability) observed.add(rule.capability);
-        if (rule.capabilityOnly) continue;
+        // A signal rule observes the capability and never raises a finding.
+        if (rule.capabilityOnly) {
+          if (rule.capability) noteCapability(rule.capability, rel);
+          continue;
+        }
 
         // Honour any rule-specific veto (e.g. "do not act without asking" is
         // a safety instruction, not a covert one).
@@ -634,6 +650,11 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
         );
         // One finding per rule per file keeps reports readable.
         if (!hit) continue;
+        // Only a match that survived the veto is evidence of the capability.
+        // Noting it first would make "do not read the .env file" count as
+        // secret access, which surfaces as R001/R004 — louder than the finding
+        // the veto just removed.
+        if (rule.capability) noteCapability(rule.capability, rel);
         const { line, snippet } = locate(segment.text, hit.index);
         findings.push({
           rule: rule.id,
@@ -724,12 +745,17 @@ export function analyzeSkill(dir: string, options: AnalyzeOptions = {}): SkillAn
       if (!declarable.includes(cap)) continue;
       if (declaredCaps.has(cap)) continue;
       const significant = SIGNIFICANT_CAPABILITIES.includes(cap);
+      const sources = [...(capabilitySources.get(cap) ?? [])].sort();
+      // SKILL.md is the file a reader acts on, so it wins when it is among the
+      // sources; that keeps a real usage impossible to ignore away by exempting
+      // a docs directory.
+      const file = sources.includes("SKILL.md") ? "SKILL.md" : (sources[0] ?? "SKILL.md");
       findings.push({
         rule: "R001",
         severity: significant ? "high" : "medium",
         title: "Undeclared capability",
         detail: `Skill declares [${declared.tools.join(", ")}] but its content exercises \`${cap}\`, which those tools do not grant. Either tighten the skill or declare the capability.`,
-        file: "SKILL.md",
+        file,
         capability: cap,
       });
     }

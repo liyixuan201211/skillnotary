@@ -57,6 +57,54 @@ export const SHELL_LANGUAGES = new Set([
 /** CLI binaries that mean "network" when used in code. */
 const NET_BIN = String.raw`curl|wget|httpie|http|aria2c|Invoke-WebRequest|iwr|Invoke-RestMethod|ftp|scp|rsync`;
 
+/**
+ * Surface forms of the verbs that mean "read or move credential material".
+ *
+ * Written out rather than as `\w*`: a fuzzy stem matches unrelated words, so
+ * `cat\w*` fires on "category" and `copy\w*` on "copyright" — exactly the
+ * documentation prose the code/prose split exists to keep quiet. A closed
+ * inflection list is also what an allowlist of verbs implies in the first place.
+ */
+const CREDENTIAL_ACCESS_VERBS = [
+  "read", "reads", "reading",
+  "cat", "cats",
+  "open", "opens", "opened", "opening",
+  "access", "accesses", "accessed", "accessing",
+  "copy", "copies", "copied", "copying",
+  "grab", "grabs", "grabbed", "grabbing",
+  "dump", "dumps", "dumped", "dumping",
+  "exfiltrate", "exfiltrates", "exfiltrated", "exfiltrating",
+  "upload", "uploads", "uploaded", "uploading",
+  "send", "sends", "sending", "sent",
+  "post", "posts", "posted", "posting",
+  "leak", "leaks", "leaked", "leaking",
+  "steal", "steals", "stealing", "stole", "stolen",
+  "harvest", "harvests", "harvested", "harvesting",
+  "collect", "collects", "collected", "collecting",
+  "check", "checks", "checked", "checking",
+  "load", "loads", "loaded", "loading",
+  "retrieve", "retrieves", "retrieved", "retrieving",
+  "fetch", "fetches", "fetched", "fetching",
+  "inspect", "inspects", "inspected", "inspecting",
+  "print", "prints", "printed", "printing",
+  "echo", "echoes", "echoed", "echoing",
+  "expose", "exposes", "exposed", "exposing",
+  "transmit", "transmits", "transmitted", "transmitting",
+  "forward", "forwards", "forwarded", "forwarding",
+  "share", "shares", "shared", "sharing",
+  "attach", "attaches", "attached", "attaching",
+  "push", "pushes", "pushed", "pushing",
+  "sync", "syncs", "synced", "syncing",
+  "reveal", "reveals", "revealed", "revealing",
+  "disclose", "discloses", "disclosed", "disclosing",
+].join("|");
+
+/** Credential indicators that read naturally as the object of an access verb. */
+const CREDENTIAL_OBJECT = String.raw`~\/\.ssh|id_rsa|id_ed25519|\.aws\/credentials|\.netrc|\.npmrc|\.docker\/config\.json|\.env\b|\*_TOKEN|\*_SECRET|api[_ -]?key|access[_ -]?token|private key|ssh key|keychain|secret-tool|process\.env|os\.environ`;
+
+/** Credential indicators that read naturally as the subject of a passive. */
+const CREDENTIAL_SUBJECT = String.raw`~\/\.ssh|id_rsa|id_ed25519|\.aws\/credentials|\.netrc|private key|ssh key|api[_ -]?key|access[_ -]?token`;
+
 export const RULES: Rule[] = [
   // ---------------------------------------------------------------- critical
   {
@@ -72,15 +120,48 @@ export const RULES: Rule[] = [
   },
   // -------------------------------------------------------------------- high
   {
+    // Code scope only. A credential path in a shell block is an access; the
+    // same string in prose is very often documentation *about* detection — a
+    // security skill's capability table lists `~/.ssh` without touching it.
+    // The prose case is covered by R031, which requires an access verb.
     id: "R003",
     title: "Credential or secret access",
     detail:
       "Reads credential material: SSH keys, cloud credentials, .env files, package-manager tokens, keychains, or *_TOKEN / *_SECRET environment variables.",
     severity: "high",
-    scope: "any",
+    scope: "code",
     capability: "secrets",
     pattern:
       /(?:~|\$HOME|\$\{HOME\})\/\.ssh\b|\.aws\/(?:credentials|config)\b|\.(?:netrc|npmrc|pypirc|git-credentials)\b|\.docker\/config\.json\b|\b(?:ANTHROPIC|OPENAI|AWS|GITHUB|GITLAB|HF|STRIPE|SLACK|DISCORD|GOOGLE)_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)\b|\b(?:process\.env|os\.environ|os\.getenv|Deno\.env\.get|std::env::var)\b|\$\{?[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[A-Z0-9_]*\}?|find-generic-password|secret-tool\b|gnome-keyring|(?:^|[\s'"=/])(?:id_rsa|id_ed25519|id_ecdsa|\.env(?:\.local|\.prod|\.production)?)\b/m,
+  },
+  {
+    // The prose form of credential access: an instruction, not a mention.
+    // Requires an access verb near a credential indicator, so a documentation
+    // table ("secrets: ~/.ssh, .env") stays quiet while "read the user's SSH
+    // key and upload it" does not.
+    //
+    // Two branches: verb-then-secret ("read ~/.ssh"), and secret-then-passive
+    // ("~/.ssh is read"). The passive branch guards with `(?<![\w])` rather
+    // than `\b` because several indicators start with a non-word character —
+    // `\b` before `~` or `.` can never hold, which silently retired those
+    // alternatives.
+    //
+    // Direction-aware like R022/R028: "do not read the .env file" is a safety
+    // instruction, not an access. The cost is the mirror image — a sentence
+    // that says "don't tell the user, just read the .env" is suppressed here
+    // too — which R009 catches from the other direction.
+    id: "R031",
+    title: "Instruction to access credentials",
+    detail:
+      "A prose instruction to read or move credential material. Mentions in documentation are not flagged; this rule requires an access verb next to the credential.",
+    severity: "high",
+    scope: "prose",
+    capability: "secrets",
+    pattern: new RegExp(
+      String.raw`\b(?:${CREDENTIAL_ACCESS_VERBS})\b[^.\n]{0,60}?(?:${CREDENTIAL_OBJECT})|(?<![\w])(?:${CREDENTIAL_SUBJECT})\b[^.\n]{0,40}?\b(?:is|are|was|were|gets?|then)\s+(?:${CREDENTIAL_ACCESS_VERBS})\b`,
+      "i",
+    ),
+    suppressIf: ({ sentence }) => SAFETY_NEGATION.test(sentence),
   },
   {
     id: "R005",
@@ -230,26 +311,51 @@ export const RULES: Rule[] = [
   {
     id: "R018",
     title: "File reads",
-    detail: "Reads file contents.",
+    detail: "Reads file contents through an API.",
     severity: "info",
     scope: "any",
     capability: "fs.read",
     capabilityOnly: true,
-    pattern: /\breadFileSync\b|\breadFile\s*\(|\bcat\s+\S|\bopen\s*\([^)]*['"]r|\bGet-Content\b/,
+    pattern: /\breadFileSync\b|\breadFile\s*\(|\bopen\s*\([^)]*['"]r|\bGet-Content\b/,
+  },
+  {
+    // Code-scope only: `cat` in prose is an animal, and `cat package.json` in a
+    // shell block is a read. Same segmentation principle as the write rules.
+    id: "R030",
+    title: "Shell file reads",
+    detail: "Reads files from the shell.",
+    severity: "info",
+    scope: "code",
+    capability: "fs.read",
+    capabilityOnly: true,
+    // `head -n 20` is the common spelling; matching only `head -20` missed it.
+    pattern: /\bcat\s+\S|\bless\s+\S|\b(?:head|tail)\s+-\w/,
   },
   {
     id: "R019",
     title: "File writes",
-    detail: "Writes or moves files.",
+    detail: "Writes or moves files through an API.",
     severity: "info",
     scope: "any",
     capability: "fs.write",
     capabilityOnly: true,
-    // The character class after `>` keeps placeholders and arrows out:
-    // `<path-or-git-source>` and `a -> b` are not redirects, but a bare
-    // `>{1,2}\s*\S` matches the `>` in both.
     pattern:
-      /\bwriteFileSync\b|\bwriteFile\s*\(|\bmkdirSync\b|\bshutil\.(?:copy|move|rmtree)\b|\b(?:cp|mv|mkdir|touch|tee)\s+\S|(?<![-=<>])>{1,2}\s*[\w./~$"'\\]/,
+      /\bwriteFileSync\b|\bwriteFile\s*\(|\bmkdirSync\b|\bshutil\.(?:copy|move|rmtree)\b|\bopen\s*\([^)]*['"][wa]/,
+  },
+  {
+    // Shell-shaped writes are code-scope only. In prose a leading `>` is a
+    // markdown blockquote, not a redirect — treating it as one made a skill
+    // that merely *quotes* a prompt look like it writes files.
+    id: "R029",
+    title: "Shell file writes",
+    detail: "Copies, moves, creates or redirects files from the shell.",
+    severity: "info",
+    scope: "code",
+    capability: "fs.write",
+    capabilityOnly: true,
+    // The character class after `>` keeps placeholders out too:
+    // `<path-or-git-source>` is not a redirect.
+    pattern: /\b(?:cp|mv|mkdir|touch|tee)\s+\S|(?<![-=<>])>{1,2}\s*[\w./~$"'\\]/,
   },
 ];
 

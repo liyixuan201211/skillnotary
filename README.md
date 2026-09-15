@@ -211,7 +211,7 @@ Default when no policy file exists: `requireLock: true`, `maxSeverity: "high"`.
 {
   "version": 1,
   "rules": { "R017": "off", "R021": "info", "R009": "critical" },
-  "ignore": ["vendor/*", "*.min.js"],
+  "ignore": ["vendor/*", "*.min.js", "R003:reference/*"],
   "ignoreSkills": ["legacy-*"],
   "targets": { "claude-code": ".claude/skills" },
   "defaultTarget": "claude-code",
@@ -223,7 +223,7 @@ Default when no policy file exists: `requireLock: true`, `maxSeverity: "high"`.
 | Key | Effect |
 |---|---|
 | `rules` | Force a rule's severity, or `"off"` to silence it |
-| `ignore` | Drop findings for matching skill-relative paths (`*` crosses `/`) |
+| `ignore` | Drop findings for matching skill-relative paths (`*` crosses `/`). Prefix with a rule id to narrow it: `"R003:reference/*"` drops only R003, only there — which is how a security skill exempts the detector strings its own docs must quote |
 | `ignoreSkills` | Skip a skill's findings entirely |
 | `targets` / `defaultTarget` | Where `apply` installs |
 | `allowInlineSuppressions` | Honour `skillnotary-ignore*` comments inside skills — **off by default** |
@@ -286,16 +286,16 @@ project and `$HOME`.
 
 ## Detection rules
 
-`R002` remote code execution (`curl | bash`) · `R003` credential access ·
-`R004` secrets + network · `R005` destructive command · `R006` privilege
-escalation · `R007` runtime install · `R008` obfuscated payload · `R009`
-coercive/covert instruction · `R010` hidden or bidi Unicode · `R011` writes
-outside the project · `R001` undeclared capability · `R015` launches another
-agent · `R016` no `SKILL.md` · `R017` no license · `R021` no declared
-permissions · `R022` skips user confirmation · `R023` symlink in skill ·
-`R024` skill too large to review fully · `R025` scan truncated · `R026`
-executable or unrecognised binary file · `R027` possible minified or obfuscated
-content.
+`R002` remote code execution (`curl | bash`) · `R003` credential access in code ·
+`R031` prose instruction to access credentials · `R004` secrets + network ·
+`R005` destructive command · `R006` privilege escalation · `R007` runtime
+install · `R008` obfuscated payload · `R009` coercive/covert instruction ·
+`R010` hidden or bidi Unicode · `R011` writes outside the project · `R001`
+undeclared capability · `R015` launches another agent · `R016` no `SKILL.md` ·
+`R017` no license · `R021` no declared permissions · `R022` skips user
+confirmation · `R028` acts covertly · `R023` symlink in skill · `R024` skill too
+large to review fully · `R025` scan truncated · `R026` executable or
+unrecognised binary file · `R027` possible minified or obfuscated content.
 
 ### Two things we do to avoid crying wolf
 
