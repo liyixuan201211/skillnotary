@@ -6,7 +6,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
 [![node: >=23.6](https://img.shields.io/badge/node-%E2%89%A523.6-informational.svg)](package.json)
-[![tests: 103 passing](https://img.shields.io/badge/tests-103%20passing-brightgreen.svg)](test)
+[![tests: 125 passing](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)](test)
 
 Your agent's skills can read your SSH keys, run shell commands and call the
 network. Nothing reviews them, nothing pins them, and they change silently.
@@ -15,6 +15,19 @@ Scanners answer *"is this skill dangerous right now?"*. `skillnotary` answers
 *"is this the skill I approved — and is it still allowed to do what it does?"*
 It gives you a `skills.lock`, a DSSE attestation, a capability policy and a CI
 gate.
+
+## This repo is the CLI; the DSH plugin is elsewhere
+
+This repository is the **command-line tool**. The DeepSeek Harness integration
+lives in a separate repository, [**dsh-skillnotary**](https://github.com/liyixuan201211/dsh-skillnotary),
+and it is deliberately a **skill** rather than a boot-time plugin — it tells the
+agent to run `npx skillnotary …` through the normal, visible shell tool, so
+nothing runs inside the DSH process. (That is why this repository has no
+`cordis.patch.yml`: there is no plugin here to patch.)
+
+```bash
+dsh plugin --profile web add github:liyixuan201211/dsh-skillnotary
+```
 
 ![A skill locked as `exec` silently gains `agent.spawn`; skillnotary verify reports the drift](demo/demo.svg)
 
