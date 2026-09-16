@@ -58,7 +58,7 @@ npx skillnotary audit                          # from npm
 npx github:liyixuan201211/skillnotary audit    # or straight from git
 ```
 
-> **Status: v0.2.0.** Tested (103 tests), typechecked under `strict`, zero
+> **Status: v0.2.0.** Tested (125 tests), typechecked under `strict`, zero
 > runtime dependencies. It has been through an internal security audit —
 > [SECURITY-AUDIT.md](SECURITY-AUDIT.md) — whose findings are fixed and each
 > covered by a regression test. See
